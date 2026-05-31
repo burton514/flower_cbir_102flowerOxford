@@ -26,6 +26,15 @@ st.caption("CBIR ảnh hoa theo hướng feature-based, offline/online pipeline 
 DEFAULT_CONFIG_PATH = ROOT / "config" / "default_config.json"
 
 
+TAB_NAMES = [
+    "Feature & Weight",
+    "Tiền xử lí offline",
+    "Trích xuất đặc trưng",
+    "Đánh giá",
+    "Truy vấn",
+    "SQLite / Xem DB",
+]
+
 def ensure_session_state():
     if "system_config" not in st.session_state:
         st.session_state.system_config = load_json(DEFAULT_CONFIG_PATH)
@@ -38,6 +47,20 @@ def ensure_session_state():
         }
     if "last_messages" not in st.session_state:
         st.session_state.last_messages = []
+    # Giữ tab đang active
+    if "active_tab" not in st.session_state:
+        st.session_state.active_tab = TAB_NAMES[0]
+    # Lưu kết quả từng tab để không bị mất khi chuyển tab
+    if "inspect_result" not in st.session_state:
+        st.session_state.inspect_result = None
+    if "preprocess_result" not in st.session_state:
+        st.session_state.preprocess_result = None
+    if "extract_result" not in st.session_state:
+        st.session_state.extract_result = None
+    if "eval_result" not in st.session_state:
+        st.session_state.eval_result = None
+    if "query_result" not in st.session_state:
+        st.session_state.query_result = None
 
 
 def append_message(msg: str):
@@ -98,16 +121,20 @@ for msg in st.session_state.last_messages[::-1]:
     st.write(f"- {msg}")
 
 catalog = get_feature_catalog()
-feature_tab, offline_tab, extract_tab, eval_tab, query_tab, db_tab = st.tabs([
-    "Feature & Weight",
-    "Tiền xử lí offline",
-    "Trích xuất đặc trưng",
-    "Đánh giá",
-    "Truy vấn",
-    "SQLite / Xem DB",
-])
 
-with feature_tab:
+# Tab selector — dùng radio nằm ngang để giữ tab khi re-render
+st.session_state.active_tab = st.radio(
+    "Chọn tab",
+    options=TAB_NAMES,
+    index=TAB_NAMES.index(st.session_state.active_tab),
+    horizontal=True,
+    label_visibility="collapsed",
+    key="tab_selector",
+)
+st.divider()
+active_tab = st.session_state.active_tab
+
+if active_tab == "Feature & Weight":
     st.markdown("### Danh sách feature")
     groups = {}
     for feature in catalog:
@@ -150,27 +177,38 @@ with feature_tab:
     df = make_feature_config_dataframe(catalog, st.session_state.feature_state)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-with offline_tab:
+# ── Tab: Tiền xử lí offline ──────────────────────────────────────────────────
+if active_tab == "Tiền xử lí offline":
     st.markdown("### Pipeline offline")
     st.write("Tạo bộ ảnh chuẩn và lưu kết quả trung gian vào workspace.")
 
     if st.button("Kiểm tra nhanh dataset", use_container_width=True):
         try:
             summary = inspect_dataset(st.session_state.applied_config["system"])
+            st.session_state.inspect_result = summary
+        except Exception as exc:
+            st.session_state.inspect_result = {"error": str(exc)}
+
+    if st.session_state.inspect_result is not None:
+        r = st.session_state.inspect_result
+        if "error" in r:
+            st.error(r["error"])
+        else:
             st.markdown("#### Thống kê dataset")
-            overview = {k: v for k, v in summary.items() if k not in {"label_counts"}}
+            overview = {k: v for k, v in r.items() if k not in {"label_counts"}}
             st.json(overview)
-            if summary.get("label_counts"):
+            if r.get("label_counts"):
                 label_df = pd.DataFrame([
                     {"label": label, "count": count}
-                    for label, count in summary["label_counts"].items()
+                    for label, count in r["label_counts"].items()
                 ])
                 st.markdown("#### Số ảnh theo nhãn")
                 st.dataframe(label_df, use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.exception(exc)
 
-    sample_limit = st.number_input("Số ảnh hiển thị log/debug gần nhất", min_value=1, max_value=20, value=5)
+    st.divider()
+
+    sample_limit = st.number_input("Số ảnh hiển thị log/debug gần nhất", min_value=1, max_value=20, value=5, key="sample_limit_input")
+
     if st.button("Chạy tiền xử lí offline", type="primary"):
         try:
             progress_bar = st.progress(0, text="Đang khởi động...")
@@ -188,17 +226,26 @@ with offline_tab:
             progress_bar.progress(1.0, text="✅ Hoàn tất!")
             status_text.empty()
             append_message(result["message"])
-            st.success(result["message"])
-            st.json({k: v for k, v in result.items() if k not in {"samples"}})
-            for sample in result.get("samples", []):
+            st.session_state.preprocess_result = result
+        except Exception as exc:
+            st.session_state.preprocess_result = {"error": str(exc)}
+
+    if st.session_state.preprocess_result is not None:
+        r = st.session_state.preprocess_result
+        if "error" in r:
+            st.exception(Exception(r["error"]))
+        else:
+            st.success(r["message"])
+            st.json({k: v for k, v in r.items() if k not in {"samples", "message"}})
+            for sample in r.get("samples", []):
                 st.markdown(f"#### {sample['file_name']}")
                 render_debug_bundle(sample["debug_bundle"])
-        except Exception as exc:
-            st.exception(exc)
 
-with extract_tab:
+# ── Tab: Trích xuất đặc trưng ────────────────────────────────────────────────
+if active_tab == "Trích xuất đặc trưng":
     st.markdown("### Trích xuất đặc trưng")
     st.write("Nút này dùng đúng bộ cấu hình đã được Áp dụng gần nhất.")
+
     if st.button("Trích xuất đặc trưng", type="primary"):
         try:
             progress_bar = st.progress(0, text="Đang khởi động...")
@@ -216,26 +263,34 @@ with extract_tab:
             progress_bar.progress(1.0, text="✅ Hoàn tất!")
             status_text.empty()
             append_message(result["message"])
-            st.success(result["message"])
-            st.json({k: v for k, v in result.items() if k not in {"sample_debug"}})
-            if result.get("sample_debug"):
+            st.session_state.extract_result = result
+        except Exception as exc:
+            st.session_state.extract_result = {"error": str(exc)}
+
+    if st.session_state.extract_result is not None:
+        r = st.session_state.extract_result
+        if "error" in r:
+            st.exception(Exception(r["error"]))
+        else:
+            st.success(r["message"])
+            st.json({k: v for k, v in r.items() if k not in {"sample_debug", "message"}})
+            if r.get("sample_debug"):
                 st.markdown("### Kết quả trung gian từ một số ảnh mẫu")
-                for item in result["sample_debug"]:
+                for item in r["sample_debug"]:
                     st.markdown(f"#### {item['file_name']}")
                     render_debug_bundle(item["debug_bundle"])
-        except Exception as exc:
-            st.exception(exc)
 
-with eval_tab:
+# ── Tab: Đánh giá ────────────────────────────────────────────────────────────
+if active_tab == "Đánh giá":
     st.markdown("### Đánh giá")
+
     if st.button("Đánh giá", type="primary"):
         try:
             db = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
             extraction_run_id = db.get_latest_extraction_run_id()
             if extraction_run_id is None:
-                st.warning("Chưa có extraction run nào trong SQLite.")
+                st.session_state.eval_result = {"warning": "Chưa có extraction run nào trong SQLite."}
             else:
-                st.markdown("#### 1. Tính Retrieval Metrics")
                 retrieval_bar = st.progress(0, text="Đang tính retrieval metrics...")
                 retrieval_status = st.empty()
 
@@ -247,39 +302,51 @@ with eval_tab:
                 retrieval_bar.progress(1.0, text="✅ Retrieval metrics xong!")
                 retrieval_status.empty()
 
-                st.markdown("#### 2. Tính Class Separation")
                 with st.spinner("Đang tính class separation metrics..."):
                     separation = evaluate_class_separation(db, extraction_run_id)
 
                 append_message("Đã tính xong metric truy hồi và độ tách lớp.")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("#### Retrieval @5 (tổng thể)")
-                    overall = {k: v for k, v in metrics.items() if k != "per_label"}
-                    st.dataframe(pd.DataFrame([overall]))
-                with col2:
-                    st.markdown("#### Class separation")
-                    st.dataframe(pd.DataFrame([separation]))
-
-                # Bảng per-label
-                per_label = metrics.get("per_label", [])
-                if per_label:
-                    st.markdown("#### Retrieval @5 theo từng nhãn")
-                    df_label = pd.DataFrame(per_label)
-                    # Thêm cột highlight nhãn nào yếu nhất
-                    df_label = df_label.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
-                    st.dataframe(
-                        df_label.style.background_gradient(
-                            subset=["precision_at_5", "recall_at_5", "map_at_5", "mrr_at_5"],
-                            cmap="RdYlGn",
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                st.session_state.eval_result = {
+                    "metrics": metrics,
+                    "separation": separation,
+                }
         except Exception as exc:
-            st.exception(exc)
+            st.session_state.eval_result = {"error": str(exc)}
 
-with query_tab:
+    if st.session_state.eval_result is not None:
+        r = st.session_state.eval_result
+        if "error" in r:
+            st.exception(Exception(r["error"]))
+        elif "warning" in r:
+            st.warning(r["warning"])
+        else:
+            metrics = r["metrics"]
+            separation = r["separation"]
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("#### Retrieval @5 (tổng thể)")
+                overall = {k: v for k, v in metrics.items() if k != "per_label"}
+                st.dataframe(pd.DataFrame([overall]))
+            with col2:
+                st.markdown("#### Class separation")
+                st.dataframe(pd.DataFrame([separation]))
+
+            per_label = metrics.get("per_label", [])
+            if per_label:
+                st.markdown("#### Retrieval @5 theo từng nhãn")
+                df_label = pd.DataFrame(per_label)
+                df_label = df_label.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
+                st.dataframe(
+                    df_label.style.background_gradient(
+                        subset=["precision_at_5", "recall_at_5", "map_at_5", "mrr_at_5"],
+                        cmap="RdYlGn",
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+# ── Tab: Truy vấn ────────────────────────────────────────────────────────────
+if active_tab == "Truy vấn":
     st.markdown("### Truy vấn")
     mode = st.radio("Nguồn query", options=["Chọn ảnh trong dataset", "Upload ảnh ngoài dataset"], horizontal=True)
     db = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
@@ -297,6 +364,7 @@ with query_tab:
         upload_file = st.file_uploader("Upload ảnh query", type=["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"])
 
     top_k = st.slider("Top-K", min_value=1, max_value=20, value=5)
+
     if st.button("Truy vấn", type="primary"):
         try:
             if selected_path is None and upload_file is None:
@@ -312,44 +380,52 @@ with query_tab:
                         top_k=int(top_k),
                     )
                 append_message("Đã chạy truy vấn theo bộ đặc trưng hiện hành.")
-                st.success("Truy vấn hoàn tất!")
-                st.markdown("### Kết quả trung gian của query")
-                render_debug_bundle(result["query_debug_bundle"])
-                st.markdown("### Top kết quả")
-                results = result["results"]
-                if results:
-                    cols = st.columns(len(results))
-                    for col, row in zip(cols, results):
-                        with col:
-                            img_path = row.get("file_path", "")
-                            try:
-                                col.image(img_path, use_container_width=True)
-                            except Exception:
-                                col.warning("Không tải được ảnh")
-                            rank = results.index(row) + 1
-                            distance_val = row.get("distance_score", row.get("score", 0))
-                            similarity_val = row.get("similarity", max(0.0, 1.0 - distance_val))
-                            lbl = row.get("label", "?")
-                            fname = row.get("file_name", "")
-                            col.markdown(
-                                f"**#{rank}** &nbsp; `{lbl}`  \n"
-                                f"Distance: `{distance_val:.4f}`  \n"
-                                f"Similarity: `{similarity_val:.4f}`  \n"
-                                f"<small>{fname}</small>",
-                                unsafe_allow_html=True,
-                            )
-                    st.markdown("---")
-                    result_df = pd.DataFrame([{k: v for k, v in r.items() if k != "feature_details"} for r in results])
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
-                    contrib = result.get("per_feature_contributions", [])
-                    if contrib:
-                        st.markdown("### Đóng góp từng đặc trưng vào điểm Top-K")
-                        st.caption("Distance raw được chuẩn hóa min-max theo từng feature; contribution = weight × normalized_distance. Tổng contribution là distance_score, càng nhỏ càng giống.")
-                        st.dataframe(pd.DataFrame(contrib), use_container_width=True, hide_index=True)
+                st.session_state.query_result = result
         except Exception as exc:
-            st.exception(exc)
+            st.session_state.query_result = {"error": str(exc)}
 
-with db_tab:
+    if st.session_state.query_result is not None:
+        r = st.session_state.query_result
+        if "error" in r:
+            st.exception(Exception(r["error"]))
+        else:
+            st.success("Truy vấn hoàn tất!")
+            st.markdown("### Kết quả trung gian của query")
+            render_debug_bundle(r["query_debug_bundle"])
+            st.markdown("### Top kết quả")
+            results = r["results"]
+            if results:
+                cols = st.columns(len(results))
+                for col, row in zip(cols, results):
+                    with col:
+                        img_path = row.get("file_path", "")
+                        try:
+                            col.image(img_path, use_container_width=True)
+                        except Exception:
+                            col.warning("Không tải được ảnh")
+                        rank = results.index(row) + 1
+                        distance_val = row.get("distance_score", row.get("score", 0))
+                        similarity_val = row.get("similarity", max(0.0, 1.0 - distance_val))
+                        lbl = row.get("label", "?")
+                        fname = row.get("file_name", "")
+                        col.markdown(
+                            f"**#{rank}** &nbsp; `{lbl}`  \n"
+                            f"Distance: `{distance_val:.4f}`  \n"
+                            f"Similarity: `{similarity_val:.4f}`  \n"
+                            f"<small>{fname}</small>",
+                            unsafe_allow_html=True,
+                        )
+                st.markdown("---")
+                result_df = pd.DataFrame([{k: v for k, v in row.items() if k != "feature_details"} for row in results])
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
+                contrib = r.get("per_feature_contributions", [])
+                if contrib:
+                    st.markdown("### Đóng góp từng đặc trưng vào điểm Top-K")
+                    st.caption("Distance raw được chuẩn hóa min-max theo từng feature; contribution = weight × normalized_distance. Tổng contribution là distance_score, càng nhỏ càng giống.")
+                    st.dataframe(pd.DataFrame(contrib), use_container_width=True, hide_index=True)
+
+# ── Tab: SQLite / Xem DB ─────────────────────────────────────────────────────
+if active_tab == "SQLite / Xem DB":
     st.markdown("### SQLite")
     db = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
     col1, col2 = st.columns(2)
