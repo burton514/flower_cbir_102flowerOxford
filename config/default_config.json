@@ -1,0 +1,38 @@
+{
+  "dataset_root": "C:\\Users\\Admin\\Desktop\\DPT_final_complete\\flowers",
+  "workspace_root": "./workspace",
+  "db_path": "./workspace/flower_cbir.sqlite",
+  "random_state": 42,
+  "image_extensions": [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+    ".tif",
+    ".tiff"
+  ],
+  "preprocessing": {
+    "use_rembg": false,
+    "alpha_threshold": 8,
+    "mask_min_area_ratio": 0.01,
+    "mask_kernel_size": 5,
+    "bbox_margin_ratio": 0.08,
+    "target_size": 256,
+    "target_object_ratio": 0.78,
+    "white_background": true,
+    "save_debug": true,
+    "canny_low": 80,
+    "canny_high": 160
+  },
+  "fusion": {
+    "auto_weight": true,
+    "exclude_meta_from_retrieval": true
+  },
+  "local_bovw": {
+    "vocab_size": 32,
+    "max_descriptors_fit": 12000,
+    "max_descriptors_per_image": 300
+  },
+  "label_source": "filename_prefix"
+}
