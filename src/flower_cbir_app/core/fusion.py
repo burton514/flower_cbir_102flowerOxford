@@ -134,3 +134,53 @@ def build_effective_weights(feature_configs: dict, auto_weight: bool = True, exc
         for key in group_keys:
             out[key] = each
     return out
+
+
+def build_fisher_weights(feature_configs: dict, feature_matrices: dict, labels: np.ndarray,
+                         exclude_meta_from_retrieval: bool = True) -> dict:
+    """Trọng số tỉ lệ với Fisher ratio của từng feature — minh bạch, giải thích được.
+
+    Fisher ratio = S_B / S_W:
+      S_B = phương sai giữa các lớp (between-class scatter)
+      S_W = phương sai trong từng lớp (within-class scatter)
+
+    Feature nào tách lớp tốt hơn (Fisher ratio cao hơn) sẽ được weight cao hơn.
+    Đây là thống kê có giám sát nhưng hoàn toàn giải thích được — không phải học sâu.
+
+    Trả về dict {feature_key: weight} đã normalize tổng = 1.
+    """
+    active = {
+        k: v for k, v in feature_configs.items()
+        if v['enabled'] and not (exclude_meta_from_retrieval and v['is_meta'])
+        and k in feature_matrices and not feature_matrices[k].empty
+    }
+    if not active:
+        return {}
+
+    label_set = sorted(set(labels.tolist()))
+    overall_mean_cache: dict = {}
+    fisher_scores: dict = {}
+
+    for key in active:
+        matrix = feature_matrices[key]
+        X = np.stack(matrix['vector'].tolist(), axis=0).astype(np.float32)
+        overall_mean = X.mean(axis=0)
+        overall_mean_cache[key] = overall_mean
+
+        sw = 0.0
+        sb = 0.0
+        for lbl in label_set:
+            cls = X[labels == lbl]
+            if len(cls) == 0:
+                continue
+            m = cls.mean(axis=0)
+            sw += float(np.sum((cls - m) ** 2))
+            sb += float(len(cls) * np.sum((m - overall_mean) ** 2))
+        fisher_scores[key] = float(sb / (sw + 1e-12))
+
+    total = sum(max(0.0, v) for v in fisher_scores.values())
+    if total < 1e-12:
+        # Fallback: chia đều nếu mọi feature đều không phân biệt được
+        n = len(active)
+        return {k: 1.0 / n for k in active}
+    return {k: max(0.0, fisher_scores[k]) / total for k in active}

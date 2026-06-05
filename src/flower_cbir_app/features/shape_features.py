@@ -155,3 +155,49 @@ def extract_symmetry_score(mask: np.ndarray) -> FeatureResult:
     ud = _foreground_overlap_score(mask_bin, np.flipud(mask_bin))
     vector = np.array([lr, ud], dtype=np.float32)
     return FeatureResult(vector, {'images': {}, 'plots': {}, 'tables': {'symmetry': {'left_right': lr, 'up_down': ud}}}, {})
+
+
+# ── Feature mới: Rotational Symmetry Order ──────────────────────────────────
+def extract_rotational_symmetry(mask: np.ndarray, max_order: int = 8) -> FeatureResult:
+    """Bậc đối xứng xoay — ước lượng số cánh hoa.
+
+    Ý nghĩa từng chiều vector (max_order chiều):
+      - vector[k] = overlap score khi xoay mask đi (k+1) × (360 / max_order) độ.
+      - Overlap = Jaccard(mask, rotated_mask) ∈ [0, 1].
+      - Nếu hoa có n cánh, xoay 360°/n sẽ cho overlap cao → vector[n-1] lớn.
+
+    Ví dụ:
+      - Hoa 5 cánh: vector[4] (xoay 72°) sẽ cao nhất.
+      - Hoa 6 cánh: vector[5] (xoay 60°) sẽ cao nhất.
+      - Bậc đối xứng ước lượng = argmax(vector) + 1.
+
+    Tại sao hữu ích:
+      - Số cánh là đặc trưng phân loại hoa rất tự nhiên, giải thích được trực tiếp.
+      - Khác với symmetry_score (chỉ đo lật ngang/dọc), feature này đo đối xứng xoay.
+    """
+    mask_bin = (mask > 0).astype(np.uint8)
+    h, w = mask_bin.shape
+    cy, cx = h / 2.0, w / 2.0
+
+    scores = []
+    for k in range(1, max_order + 1):
+        angle = k * 360.0 / max_order
+        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+        rotated = cv2.warpAffine(mask_bin, M, (w, h), flags=cv2.INTER_NEAREST)
+        a = mask_bin.astype(bool)
+        b = rotated.astype(bool)
+        union = np.logical_or(a, b).sum()
+        inter = np.logical_and(a, b).sum()
+        scores.append(float(inter / (union + 1e-12)))
+
+    vector = np.array(scores, dtype=np.float32)
+    best_order = int(np.argmax(vector)) + 1
+    return FeatureResult(
+        vector,
+        {'images': {}, 'plots': {'Rotational overlap': {'y': vector.tolist()}},
+         'tables': {'rotational_symmetry': {
+             'estimated_petal_count': best_order,
+             'best_overlap': float(vector[best_order - 1]),
+         }}},
+        {}
+    )

@@ -17,7 +17,7 @@ from flower_cbir_app.evaluation.retrieval_metrics import evaluate_dataset_retrie
 from flower_cbir_app.features.registry import get_default_feature_state, get_feature_catalog
 from flower_cbir_app.storage.sqlite_manager import SQLiteManager
 from flower_cbir_app.utils.config_utils import load_json, save_json, deep_update
-from flower_cbir_app.utils.display import render_debug_bundle, make_feature_config_dataframe
+from flower_cbir_app.utils.display import render_debug_bundle, make_feature_config_dataframe, render_feature_glossary
 
 st.set_page_config(page_title="Flower CBIR Workbench", layout="wide")
 st.title("Flower CBIR Workbench")
@@ -59,6 +59,8 @@ def ensure_session_state():
         st.session_state.extract_result = None
     if "eval_result" not in st.session_state:
         st.session_state.eval_result = None
+    if "fisher_weight_result" not in st.session_state:
+        st.session_state.fisher_weight_result = None
     if "query_result" not in st.session_state:
         st.session_state.query_result = None
 
@@ -176,6 +178,65 @@ if active_tab == "Feature & Weight":
     st.markdown("### Bảng tổng hợp nhanh")
     df = make_feature_config_dataframe(catalog, st.session_state.feature_state)
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Fisher Weight ────────────────────────────────────────────────────────
+    st.markdown("### ⚖️ Tính trọng số theo Fisher Ratio")
+    st.caption(
+        "Fisher ratio = S_B / S_W (phương sai giữa lớp / trong lớp). "
+        "Feature nào tách lớp tốt hơn sẽ được weight cao hơn. "
+        "Cần đã có extraction run trong SQLite."
+    )
+    if st.button("Tính Fisher Weight từ dữ liệu", use_container_width=True):
+        try:
+            from flower_cbir_app.core.fusion import build_fisher_weights
+            import numpy as _np
+            db_fw = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
+            run_id = db_fw.get_latest_extraction_run_id()
+            if run_id is None:
+                st.session_state.fisher_weight_result = {"warning": "Chưa có extraction run. Hãy trích xuất đặc trưng trước."}
+            else:
+                configs_fw = db_fw.get_extraction_feature_configs(run_id)
+                matrices_fw = {k: db_fw.get_feature_matrix(run_id, k) for k in configs_fw}
+                matrices_fw = {k: v for k, v in matrices_fw.items() if not v.empty}
+                base_fw = next(iter(matrices_fw.values())) if matrices_fw else None
+                if base_fw is None:
+                    st.session_state.fisher_weight_result = {"warning": "Không có vector trong DB."}
+                else:
+                    labels_fw = _np.asarray(base_fw['label'].tolist())
+                    fw = build_fisher_weights(
+                        configs_fw, matrices_fw, labels_fw,
+                        exclude_meta_from_retrieval=True,
+                    )
+                    st.session_state.fisher_weight_result = fw
+                    append_message("Đã tính Fisher weight từ dữ liệu.")
+        except Exception as exc:
+            st.session_state.fisher_weight_result = {"error": str(exc)}
+
+    if st.session_state.fisher_weight_result is not None:
+        r = st.session_state.fisher_weight_result
+        if isinstance(r, dict) and "error" in r:
+            st.exception(Exception(r["error"]))
+        elif isinstance(r, dict) and "warning" in r:
+            st.warning(r["warning"])
+        else:
+            fw_df = pd.DataFrame([
+                {"feature": k, "fisher_weight": round(v, 6)}
+                for k, v in sorted(r.items(), key=lambda x: -x[1])
+            ])
+            st.dataframe(fw_df, use_container_width=True, hide_index=True)
+            if st.button("Áp dụng Fisher Weight vào cấu hình hiện tại", type="primary"):
+                for k, v in r.items():
+                    if k in st.session_state.feature_state:
+                        st.session_state.feature_state[k]["weight"] = float(v)
+                append_message("Đã áp dụng Fisher weight vào feature_state. Nhớ bấm 'Áp dụng cấu hình' để lưu.")
+                st.rerun()
+
+    st.divider()
+
+    # ── Từ điển chiều vector ─────────────────────────────────────────────────
+    render_feature_glossary(catalog, st.session_state.feature_state)
 
 # ── Tab: Tiền xử lí offline ──────────────────────────────────────────────────
 if active_tab == "Tiền xử lí offline":

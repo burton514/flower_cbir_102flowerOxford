@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial.distance import cdist
 from sklearn.metrics import silhouette_score
 
-from flower_cbir_app.core.fusion import build_effective_weights, compute_distance, normalize_distance_values, resolve_distance_type
+from flower_cbir_app.core.fusion import build_effective_weights, normalize_distance_values, resolve_distance_type
 
 
 def _get_fusion_config(db, extraction_run_id: int) -> dict:
@@ -13,12 +14,32 @@ def _get_fusion_config(db, extraction_run_id: int) -> dict:
 
 
 def _pairwise_feature_distance(vectors: list[np.ndarray], metric: str) -> np.ndarray:
-    n = len(vectors)
-    D = np.zeros((n, n), dtype=np.float32)
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = compute_distance(vectors[i], vectors[j], metric)
-            D[i, j] = D[j, i] = d
+    """Tính ma trận khoảng cách N×N bằng vectorization rồi normalize.
+
+    Thay thế 2 vòng lặp lồng nhau O(N²) Python calls trước đây.
+    """
+    X = np.stack(vectors, axis=0).astype(np.float32)
+    n = len(X)
+
+    if metric == 'cosine':
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1e-12, norms)
+        X_norm = X / norms
+        D = np.clip(1.0 - (X_norm @ X_norm.T), 0.0, 2.0).astype(np.float32)
+    elif metric == 'l2':
+        D = cdist(X, X, metric='euclidean').astype(np.float32)
+    elif metric == 'chi_square':
+        X = np.maximum(X, 0.0)
+        D = np.zeros((n, n), dtype=np.float32)
+        for i in range(n):
+            diff = X[i] - X
+            sumv = X[i] + X + 1e-10
+            D[i] = 0.5 * np.sum(diff ** 2 / sumv, axis=1)
+    else:
+        raise ValueError(f'Unknown metric: {metric}')
+
+    np.fill_diagonal(D, 0.0)
+
     if n > 1:
         tri = np.triu_indices(n, k=1)
         norm_vals = normalize_distance_values(D[tri])
@@ -65,8 +86,6 @@ def evaluate_class_separation(db, extraction_run_id: int) -> dict:
     labels = np.asarray(base['label'].tolist())
     n = len(labels)
 
-    # Dùng cùng logic distance/fusion với retrieval: mỗi feature tính distance riêng,
-    # normalize theo feature, rồi cộng trọng số.
     D = np.zeros((n, n), dtype=np.float32)
     for key, matrix in matrices.items():
         vectors = matrix['vector'].tolist()
@@ -90,7 +109,6 @@ def evaluate_class_separation(db, extraction_run_id: int) -> dict:
     can_silhouette = len(label_set) > 1 and n > len(label_set) and min(label_counts.values()) >= 2
     sil = float(silhouette_score(D, labels, metric='precomputed')) if can_silhouette else 0.0
 
-    # Fisher ratio vẫn tính trên không gian vector nối sau chuẩn hóa, dùng như chỉ số phụ.
     X = np.concatenate([np.stack(matrices[k]['vector'].to_list(), axis=0) for k in matrices.keys()], axis=1)
     overall_mean = X.mean(axis=0)
     sw = 0.0

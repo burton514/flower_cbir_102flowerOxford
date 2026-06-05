@@ -1,1 +1,178 @@
+# ============================================================
+# .gitignore cho Python project: Flower CBIR (Streamlit + SQLite + OpenCV)
+# Chạy trên Windows
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Python cache & bytecode
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.whl
+MANIFEST
+
+
+# ------------------------------------------------------------
+# Môi trường ảo (virtual environments)
+# ------------------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.virtualenv/
+
+
+# ------------------------------------------------------------
+# Biến môi trường & secrets
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+
+# ------------------------------------------------------------
+# IDE: VS Code
+# Giữ lại extensions.json để chia sẻ extension gợi ý với team
+# ------------------------------------------------------------
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/*.code-snippets
+
+# IDE: JetBrains / PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# IDE: Visual Studio
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+
+# ------------------------------------------------------------
+# Hệ điều hành Windows
+# ------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS (phòng khi cộng tác trên Mac)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+
+# ------------------------------------------------------------
+# Thư mục workspace sinh ra khi chạy ứng dụng (project-specific)
+# Chứa ảnh đã tiền xử lý, debug images, file trung gian, v.v.
+# ------------------------------------------------------------
 /workspace/
+
+
+# ------------------------------------------------------------
+# SQLite / database files
+# Bỏ qua tất cả file DB sinh ra lúc runtime.
+# Nếu có file seed/fixture thì dùng !tên_file.db để giữ lại.
+# ------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+
+# ------------------------------------------------------------
+# Streamlit credentials & cache
+# ------------------------------------------------------------
+.streamlit/
+
+
+# ------------------------------------------------------------
+# Jupyter Notebook (project này không dùng, bỏ qua toàn bộ)
+# ------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+profile_default/
+ipython_config.py
+
+
+# ------------------------------------------------------------
+# Log files
+# ------------------------------------------------------------
+*.log
+logs/
+log/
+
+
+# ------------------------------------------------------------
+# File tạm, backup, swap
+# ------------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+
+# ------------------------------------------------------------
+# Numpy / Scipy / OpenCV: file biên dịch native
+# ------------------------------------------------------------
+*.so
+*.pyd
+
+
+# ------------------------------------------------------------
+# rembg model cache
+# Lưu ý: ~/.u2net/ nằm trong home directory của người dùng,
+# git không thể ignore đường dẫn tuyệt đối ngoài repo.
+# Đảm bảo KHÔNG copy thư mục này vào trong project.
+# Đường dẫn thường gặp: C:\Users\<tên>\.u2net\
+# ------------------------------------------------------------
+.u2net/
+
+
+# ------------------------------------------------------------
+# Coverage & testing
+# ------------------------------------------------------------
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+
+# ------------------------------------------------------------
+# mypy / type checkers
+# ------------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/

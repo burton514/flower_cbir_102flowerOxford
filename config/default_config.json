@@ -1,5 +1,5 @@
 {
-  "dataset_root": "C:\\Users\\Admin\\Desktop\\DPT_final_complete\\flowers",
+  "dataset_root": "D:\\hoc hanh\\csdldpt\\btl\\flower_cbir_102flowerOxford\\flowers_final",
   "workspace_root": "./workspace",
   "db_path": "./workspace/flower_cbir.sqlite",
   "random_state": 42,
@@ -26,7 +26,7 @@
     "canny_high": 160
   },
   "fusion": {
-    "auto_weight": true,
+    "auto_weight": false,
     "exclude_meta_from_retrieval": true
   },
   "local_bovw": {

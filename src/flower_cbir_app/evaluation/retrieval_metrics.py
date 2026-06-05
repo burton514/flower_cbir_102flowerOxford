@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections import defaultdict
 
 import numpy as np
+from scipy.spatial.distance import cdist
 
 from flower_cbir_app.core.fusion import (
     aggregate_weighted_distances,
     build_effective_weights,
-    compute_distance,
+    normalize_distance_values,
     resolve_distance_type,
 )
 
@@ -47,6 +48,34 @@ def _get_fusion_config(db, extraction_run_id: int) -> dict:
     return system_config.get('fusion', {}) if isinstance(system_config, dict) else {}
 
 
+def _compute_distance_matrix(X: np.ndarray, metric: str) -> np.ndarray:
+    """Tính ma trận khoảng cách N×N bằng vectorization thay vì vòng lặp Python.
+
+    - cosine    : 1 - (X_norm @ X_norm.T), clip [0, 2]  — O(N²D) numpy thuần
+    - l2        : scipy cdist euclidean                  — chạy bằng C
+    - chi_square: broadcasting theo hàng                 — nhanh hơn N² Python calls
+    """
+    X = np.asarray(X, dtype=np.float32)
+    if metric == 'cosine':
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1e-12, norms)
+        X_norm = X / norms
+        D = 1.0 - (X_norm @ X_norm.T)
+        return np.clip(D, 0.0, 2.0).astype(np.float32)
+    if metric == 'l2':
+        return cdist(X, X, metric='euclidean').astype(np.float32)
+    if metric == 'chi_square':
+        X = np.maximum(X, 0.0)
+        n = len(X)
+        D = np.zeros((n, n), dtype=np.float32)
+        for i in range(n):
+            diff = X[i] - X
+            sumv = X[i] + X + 1e-10
+            D[i] = 0.5 * np.sum(diff ** 2 / sumv, axis=1)
+        return D
+    raise ValueError(f'Unknown metric: {metric}')
+
+
 def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=None) -> dict:
     configs = db.get_extraction_feature_configs(extraction_run_id)
     fusion_config = _get_fusion_config(db, extraction_run_id)
@@ -66,49 +95,56 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
         }
 
     base = next(iter(matrices.values()))
-    all_labels = np.asarray(base['label'].tolist())
+    all_labels    = np.asarray(base['label'].tolist())
+    all_image_ids = np.asarray(base['image_id'].tolist(), dtype=np.int64)
     total = len(base)
+
+    # ── Tính ma trận khoảng cách N×N cho từng feature một lần ──────────────
+    # Mỗi feature: stack vector → distance matrix → normalize upper-tri
+    # → nhân trọng số → cộng vào D_fused
+    # Thay thế 2 vòng lặp lồng nhau O(N²) Python calls trước đây.
+    D_fused = np.zeros((total, total), dtype=np.float32)
+    for key, matrix in matrices.items():
+        X = np.stack(matrix['vector'].tolist(), axis=0).astype(np.float32)
+        metric = resolve_distance_type(configs[key])
+        D_key = _compute_distance_matrix(X, metric)
+
+        tri = np.triu_indices(total, k=1)
+        norm_vals = normalize_distance_values(D_key[tri])
+        D_norm = np.zeros((total, total), dtype=np.float32)
+        D_norm[tri] = norm_vals
+        D_norm[(tri[1], tri[0])] = norm_vals
+
+        D_fused += float(weights.get(key, 0.0)) * D_norm
+
+    np.fill_diagonal(D_fused, np.inf)  # loại query khỏi kết quả
 
     label_precisions: dict = defaultdict(list)
     label_recalls:    dict = defaultdict(list)
     label_maps:       dict = defaultdict(list)
     label_mrrs:       dict = defaultdict(list)
     label_skipped:    dict = defaultdict(int)
-
-    cached_vectors = {key: matrices[key]['vector'].tolist() for key in matrices.keys()}
-    metric_by_key = {key: resolve_distance_type(configs[key]) for key in matrices.keys()}
     evaluated_queries = 0
     skipped_queries = 0
 
-    for i, (_, query_row) in enumerate(base.iterrows()):
+    file_names = base.get('file_name', None)
+
+    for i in range(total):
         if progress_callback:
-            fname = query_row.get('file_name', str(i))
+            fname = file_names.iloc[i] if file_names is not None else str(i)
             progress_callback(i / max(total, 1), f'[Đánh giá {i + 1}/{total}] {fname}')
-        label = query_row['label']
+
+        label = all_labels[i]
         total_relevant = int(np.sum(all_labels == label)) - 1
         if total_relevant <= 0:
             skipped_queries += 1
             label_skipped[label] += 1
             continue
 
-        candidate_info = []
-        scores_by_feature = {key: [] for key in matrices.keys()}
-        for j, (_, cand_row) in enumerate(base.iterrows()):
-            if i == j:
-                continue
-            image_id = int(cand_row['image_id'])
-            candidate_info.append((image_id, cand_row['label']))
-            for key in matrices.keys():
-                qv = cached_vectors[key][i]
-                cv = cached_vectors[key][j]
-                dist = compute_distance(qv, cv, metric_by_key[key])
-                scores_by_feature[key].append((image_id, dist))
-
-        aggregated = aggregate_weighted_distances(scores_by_feature, weights)
-        label_by_image_id = {image_id: cand_label for image_id, cand_label in candidate_info}
-        ranked = sorted(aggregated.items(), key=lambda x: x[1])
-        top = ranked[:5]
-        relevance = np.array([1 if label_by_image_id[image_id] == label else 0 for image_id, _ in top], dtype=np.float32)
+        row = D_fused[i]
+        sorted_idx = np.argsort(row)[:5]
+        top_labels = all_labels[sorted_idx]
+        relevance  = (top_labels == label).astype(np.float32)
 
         label_precisions[label].append(_precision_at_k(relevance))
         label_recalls[label].append(_recall_at_k(relevance, total_relevant))

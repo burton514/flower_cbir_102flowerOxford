@@ -24,3 +24,4 @@ class FeatureSpec:
     is_meta: bool = False
     is_histogram: bool = False  # True → dùng L1-normalize thay vì z-score khi lưu vector
     supports_chi_square: bool = False  # True khi vector là histogram không âm phù hợp χ²
+    default_weight: float = 1.0  # Trọng số mặc định khi auto_weight=False
