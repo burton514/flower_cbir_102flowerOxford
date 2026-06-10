@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from typing import Dict, Tuple
 
 import cv2
@@ -296,3 +297,37 @@ def preprocess_image(path: str | None, config: dict, file_bytes: bytes | None = 
             'bad_mask': bad_mask,
         },
     }
+
+
+def load_preprocessed_from_disk(normalized_path: str, mask_path: str, gray_path: str, edge_path: str) -> Dict[str, np.ndarray | dict] | None:
+    """Nạp lại kết quả tiền xử lý đã lưu ra đĩa thay vì chạy lại preprocess_image().
+
+    Trả về dict tối thiểu đủ cho các EXTRACTORS (image_rgb, mask, gray, edge) kèm
+    debug_bundle/stats rỗng. Trả None nếu thiếu file để caller fallback sang
+    preprocess_image() (tính lại từ ảnh gốc).
+
+    Đây là tối ưu để extraction không tiền xử lý lại các ảnh đã xử lý ở bước offline.
+    """
+    try:
+        if not all(p and Path(p).exists() for p in [normalized_path, mask_path, gray_path, edge_path]):
+            return None
+        norm_bgr = cv2.imread(normalized_path, cv2.IMREAD_COLOR)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        gray = cv2.imread(gray_path, cv2.IMREAD_GRAYSCALE)
+        edge = cv2.imread(edge_path, cv2.IMREAD_GRAYSCALE)
+        if norm_bgr is None or mask is None or gray is None or edge is None:
+            return None
+        image_rgb = cv2.cvtColor(norm_bgr, cv2.COLOR_BGR2RGB)
+        mask = (mask > 0).astype(np.uint8) * 255
+
+        occupancy = float(np.count_nonzero(mask) / mask.size) if mask.size else 0.0
+        return {
+            'image_rgb': image_rgb,
+            'mask': mask,
+            'gray': gray,
+            'edge': edge,
+            'debug_bundle': {'images': {}, 'plots': {}, 'tables': {}},
+            'stats': {'occupancy_ratio': occupancy, 'loaded_from_disk': True},
+        }
+    except Exception:
+        return None

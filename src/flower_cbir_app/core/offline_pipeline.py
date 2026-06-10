@@ -7,8 +7,8 @@ import hashlib
 import re
 import numpy as np
 
-from flower_cbir_app.core.fusion import zscore_apply
-from flower_cbir_app.core.preprocessing import preprocess_image
+from flower_cbir_app.core.fusion import pairwise_distance_matrix, resolve_distance_type, zscore_apply
+from flower_cbir_app.core.preprocessing import load_preprocessed_from_disk, preprocess_image
 from flower_cbir_app.features.local_features import bovw_feature_result, descriptors_to_bovw, extract_local_descriptors, fit_bovw_vocabulary, get_descriptor_dim
 from flower_cbir_app.features.registry import EXTRACTORS, LOCAL_FEATURE_MAP, get_feature_catalog
 from flower_cbir_app.storage.sqlite_manager import SQLiteManager
@@ -173,6 +173,10 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
     db.reset_extraction_data()  # Xóa sạch dữ liệu extraction cũ trước khi chạy lại
     extraction_run_id = db.create_extraction_run({'system': system_config, 'features': feature_state})
 
+    # Tái dùng ảnh đã tiền xử lý ở bước offline (nếu có) để không preprocess 2 lần.
+    preprocessed_map = db.get_preprocess_outputs_map()
+    reused_count = 0
+
     enabled_features = [k for k, v in feature_state.items() if v['enabled']]
     enabled_standard = [k for k in enabled_features if k in EXTRACTORS]
     enabled_local = [k for k in enabled_features if k in LOCAL_FEATURE_MAP]
@@ -183,9 +187,21 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
     for idx, path in enumerate(files):
         if progress_callback:
             progress_callback(idx / total * 0.7, f'[{idx + 1}/{total}] Trích xuất: {path.name}')
-        processed = preprocess_image(str(path), system_config)
         label = parse_label_from_path(path, dataset_root, system_config.get('label_source', 'auto'))
         image_id = db.upsert_image(str(path), path.name, label)
+
+        # Ưu tiên nạp lại ảnh chuẩn hóa từ đĩa; chỉ preprocess lại nếu thiếu file.
+        processed = None
+        paths = preprocessed_map.get(image_id)
+        if paths is not None:
+            processed = load_preprocessed_from_disk(
+                paths['normalized_path'], paths['mask_path'], paths['gray_path'], paths['edge_path']
+            )
+        if processed is None:
+            processed = preprocess_image(str(path), system_config)
+        else:
+            reused_count += 1
+
         record = {
             'image_id': image_id,
             'file_name': path.name,
@@ -245,10 +261,14 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
             result = bovw_feature_result(hist, LOCAL_FEATURE_MAP[key], extra.get('keypoint_count', 0))
             item['feature_vectors'][key] = result.vector.astype(np.float32)
 
+    # Mảng image_id theo đúng thứ tự xử lý (dùng chung cho mọi feature matrix).
+    image_ids = np.asarray([item['image_id'] for item in all_processed], dtype=np.int64)
+
     # Normalize per feature: L1 cho histogram, z-score cho non-histogram
     if progress_callback:
         progress_callback(0.82, 'Chuẩn hoá vector...')
     feature_configs_saved = {}
+    normalized_matrices = {}  # key → ma trận N×D đã chuẩn hóa (để lưu gộp + tính scale)
     for key in enabled_features:
         spec = catalog[key]
         vectors = np.stack([item['feature_vectors'][key] for item in all_processed], axis=0).astype(np.float32)
@@ -258,7 +278,6 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
             row_sums = vectors.sum(axis=1, keepdims=True)
             row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
             vectors_norm = vectors / row_sums
-            # Lưu mean=0, std=1 (dummy) để online pipeline giữ nguyên vector
             mean = np.zeros(vectors.shape[1], dtype=np.float32)
             std  = np.ones(vectors.shape[1], dtype=np.float32)
         else:
@@ -268,33 +287,58 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
             std[std < 1e-8] = 1.0
             vectors_norm = (vectors - mean) / std
 
-        for idx, item in enumerate(all_processed):
-            item['feature_vectors'][key] = vectors_norm[idx].astype(np.float32)
+        vectors_norm = vectors_norm.astype(np.float32)
+        normalized_matrices[key] = vectors_norm
+
+        # Distance type thực tế (fallback chi_square→l2 nếu không hợp lệ).
+        distance_type = ('l2' if feature_state[key].get('distance') == 'chi_square' and not spec.supports_chi_square
+                         else feature_state[key].get('distance', spec.default_distance))
+
+        # Tính thang đo distance CỐ ĐỊNH trên toàn dataset (min/max của upper-triangle)
+        # để online normalize ổn định, không bị trôi theo từng query.
+        d_min, d_max = 0.0, 1.0
+        n = len(vectors_norm)
+        if n > 1:
+            D = pairwise_distance_matrix(vectors_norm, distance_type)
+            tri = np.triu_indices(n, k=1)
+            tri_vals = D[tri]
+            if tri_vals.size:
+                d_min = float(np.min(tri_vals))
+                d_max = float(np.max(tri_vals))
 
         db.insert_feature_config(
             extraction_run_id,
             feature_key=key,
             group_name=spec.group,
             enabled=True,
-            distance_type=('l2' if feature_state[key].get('distance') == 'chi_square' and not spec.supports_chi_square else feature_state[key].get('distance', spec.default_distance)),
+            distance_type=distance_type,
             weight=float(feature_state[key]['weight']),
             is_meta=spec.is_meta,
             mean=mean,
             std=std,
             vocab=vocabularies.get(key),
+            d_min=d_min,
+            d_max=d_max,
             extra={'output_dim': int(vectors.shape[1]), 'is_histogram': spec.is_histogram, 'supports_chi_square': spec.supports_chi_square},
         )
-        feature_configs_saved[key] = {'dim': int(vectors.shape[1]), 'norm': 'l1' if spec.is_histogram else 'zscore'}
+        feature_configs_saved[key] = {
+            'dim': int(vectors.shape[1]),
+            'norm': 'l1' if spec.is_histogram else 'zscore',
+            'distance': distance_type,
+            'd_min': round(d_min, 6),
+            'd_max': round(d_max, 6),
+        }
 
+    # Lưu GỘP ma trận từng feature (một blob/feature) thay vì 1 dòng/ảnh/feature.
     if progress_callback:
-        progress_callback(0.92, 'Lưu vector vào SQLite...')
-    for item in all_processed:
-        for key in enabled_features:
-            db.insert_feature_vector(extraction_run_id, item['image_id'], key, item['feature_vectors'][key], extra={'label': item['label']})
+        progress_callback(0.92, 'Lưu ma trận đặc trưng vào SQLite...')
+    for key in enabled_features:
+        db.insert_feature_matrix(extraction_run_id, key, image_ids, normalized_matrices[key])
 
     summary = {
         'num_images': len(all_processed),
         'num_enabled_features': len(enabled_features),
+        'reused_preprocessed': int(reused_count),
         'features': feature_configs_saved,
     }
     db.update_extraction_run_summary(extraction_run_id, summary)
@@ -304,6 +348,7 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
         'extraction_run_id': extraction_run_id,
         'num_images': len(all_processed),
         'enabled_features': enabled_features,
-        'message': f'Đã trích xuất đặc trưng cho {len(all_processed)} ảnh với {len(enabled_features)} feature.',
+        'reused_preprocessed': int(reused_count),
+        'message': f'Đã trích xuất đặc trưng cho {len(all_processed)} ảnh với {len(enabled_features)} feature (tái dùng {reused_count} ảnh tiền xử lý).',
         'sample_debug': sample_debug,
     }

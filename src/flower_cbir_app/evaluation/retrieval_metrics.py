@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections import defaultdict
 
 import numpy as np
-from scipy.spatial.distance import cdist
 
 from flower_cbir_app.core.fusion import (
-    aggregate_weighted_distances,
     build_effective_weights,
     normalize_distance_values,
+    pairwise_distance_matrix,
     resolve_distance_type,
 )
 
@@ -49,31 +48,8 @@ def _get_fusion_config(db, extraction_run_id: int) -> dict:
 
 
 def _compute_distance_matrix(X: np.ndarray, metric: str) -> np.ndarray:
-    """Tính ma trận khoảng cách N×N bằng vectorization thay vì vòng lặp Python.
-
-    - cosine    : 1 - (X_norm @ X_norm.T), clip [0, 2]  — O(N²D) numpy thuần
-    - l2        : scipy cdist euclidean                  — chạy bằng C
-    - chi_square: broadcasting theo hàng                 — nhanh hơn N² Python calls
-    """
-    X = np.asarray(X, dtype=np.float32)
-    if metric == 'cosine':
-        norms = np.linalg.norm(X, axis=1, keepdims=True)
-        norms = np.where(norms < 1e-12, 1e-12, norms)
-        X_norm = X / norms
-        D = 1.0 - (X_norm @ X_norm.T)
-        return np.clip(D, 0.0, 2.0).astype(np.float32)
-    if metric == 'l2':
-        return cdist(X, X, metric='euclidean').astype(np.float32)
-    if metric == 'chi_square':
-        X = np.maximum(X, 0.0)
-        n = len(X)
-        D = np.zeros((n, n), dtype=np.float32)
-        for i in range(n):
-            diff = X[i] - X
-            sumv = X[i] + X + 1e-10
-            D[i] = 0.5 * np.sum(diff ** 2 / sumv, axis=1)
-        return D
-    raise ValueError(f'Unknown metric: {metric}')
+    """Wrapper sang pairwise_distance_matrix dùng chung trong fusion."""
+    return pairwise_distance_matrix(X, metric)
 
 
 def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=None) -> dict:

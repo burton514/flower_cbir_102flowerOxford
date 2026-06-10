@@ -74,6 +74,81 @@ def normalize_distance_values(distances: Iterable[float]) -> np.ndarray:
     return (arr - d_min) / (d_max - d_min + 1e-12)
 
 
+def normalize_distance_fixed(distances, d_min: float, d_max: float) -> np.ndarray:
+    """Normalize distance bằng min/max CỐ ĐỊNH (đo sẵn trên toàn dataset lúc extract).
+
+    Khác với normalize_distance_values (min-max theo từng query → thang đo trôi),
+    hàm này dùng thang đo cố định nên kết quả ổn định giữa các truy vấn khác nhau.
+    Giá trị được clip về [0, 1] để query lạ không phá thang đo.
+    """
+    arr = np.asarray(distances, dtype=np.float32)
+    if arr.size == 0:
+        return arr
+    rng = float(d_max) - float(d_min)
+    if rng < 1e-12:
+        return np.zeros_like(arr, dtype=np.float32)
+    out = (arr - float(d_min)) / (rng + 1e-12)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def pairwise_distance_matrix(X: np.ndarray, metric: str) -> np.ndarray:
+    """Ma trận khoảng cách N×N vectorized — dùng chung cho evaluation và stats.
+
+    - cosine    : 1 - (X_norm @ X_normᵀ), clip [0, 2]
+    - l2        : scipy cdist euclidean
+    - chi_square: broadcasting theo hàng (histogram không âm)
+    """
+    from scipy.spatial.distance import cdist
+
+    X = np.asarray(X, dtype=np.float32)
+    if metric == 'cosine':
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1e-12, norms)
+        Xn = X / norms
+        D = 1.0 - (Xn @ Xn.T)
+        return np.clip(D, 0.0, 2.0).astype(np.float32)
+    if metric == 'l2':
+        return cdist(X, X, metric='euclidean').astype(np.float32)
+    if metric == 'chi_square':
+        Xp = np.maximum(X, 0.0)
+        n = len(Xp)
+        D = np.zeros((n, n), dtype=np.float32)
+        for i in range(n):
+            diff = Xp[i] - Xp
+            sumv = Xp[i] + Xp + 1e-10
+            D[i] = 0.5 * np.sum(diff ** 2 / sumv, axis=1)
+        return D
+    raise ValueError(f'Unknown metric: {metric}')
+
+
+def distances_to_matrix(query_vector: np.ndarray, matrix: np.ndarray, metric: str) -> np.ndarray:
+    """Khoảng cách từ 1 query vector tới toàn bộ N hàng của matrix (vectorized).
+
+    Trả về mảng shape (N,). Dùng trong online pipeline để bỏ vòng lặp Python.
+    """
+    q = np.asarray(query_vector, dtype=np.float32).ravel()
+    M = np.asarray(matrix, dtype=np.float32)
+    if M.ndim == 1:
+        M = M.reshape(1, -1)
+    if metric == 'l2':
+        return np.linalg.norm(M - q[None, :], axis=1).astype(np.float32)
+    if metric == 'cosine':
+        qn = np.linalg.norm(q)
+        Mn = np.linalg.norm(M, axis=1)
+        denom = (Mn * qn) + 1e-12
+        sim = (M @ q) / denom
+        out = 1.0 - sim
+        out[(Mn < 1e-12) | (qn < 1e-12)] = 1.0
+        return np.clip(out, 0.0, 2.0).astype(np.float32)
+    if metric == 'chi_square':
+        qp = np.maximum(q, 0.0)
+        Mp = np.maximum(M, 0.0)
+        diff = Mp - qp[None, :]
+        sumv = Mp + qp[None, :] + 1e-10
+        return (0.5 * np.sum(diff ** 2 / sumv, axis=1)).astype(np.float32)
+    raise ValueError(f'Unknown metric: {metric}')
+
+
 def aggregate_weighted_distances_with_details(scores_by_feature: dict, weights: dict) -> tuple[dict, dict]:
     """Chuẩn hóa distance theo từng feature rồi cộng trọng số, kèm chi tiết.
 
@@ -112,6 +187,42 @@ def aggregate_weighted_distances(scores_by_feature: dict, weights: dict) -> dict
     """Chuẩn hóa distance theo từng feature rồi cộng trọng số."""
     aggregated, _ = aggregate_weighted_distances_with_details(scores_by_feature, weights)
     return aggregated
+
+
+def aggregate_fixed_scale_with_details(dist_by_feature: dict, scale_by_feature: dict, weights: dict) -> tuple[dict, dict]:
+    """Fusion dùng thang chuẩn hóa CỐ ĐỊNH (đo sẵn lúc extract), vectorized.
+
+    dist_by_feature: {feature_key: (image_ids: np.ndarray[N], raw_dists: np.ndarray[N])}
+    scale_by_feature: {feature_key: (d_min, d_max)}
+    weights: {feature_key: weight}
+
+    Trả về:
+        aggregated: {image_id: final_distance_score}  (càng nhỏ càng giống)
+        details:    {image_id: [contribution rows]}
+
+    Khác aggregate_weighted_distances_with_details ở chỗ dùng min/max cố định
+    (ổn định giữa các query) thay vì min-max theo từng tập ứng viên.
+    """
+    aggregated: dict = defaultdict(float)
+    details: dict = defaultdict(list)
+    for key, (image_ids, raw_dists) in dist_by_feature.items():
+        if key not in weights or len(image_ids) == 0:
+            continue
+        d_min, d_max = scale_by_feature.get(key, (0.0, 1.0))
+        normalized = normalize_distance_fixed(raw_dists, d_min, d_max)
+        weight = float(weights.get(key, 0.0))
+        contrib = weight * normalized
+        for idx in range(len(image_ids)):
+            image_id = int(image_ids[idx])
+            aggregated[image_id] += float(contrib[idx])
+            details[image_id].append({
+                'feature_key': key,
+                'raw_distance': float(raw_dists[idx]),
+                'normalized_distance': float(normalized[idx]),
+                'weight': weight,
+                'contribution': float(contrib[idx]),
+            })
+    return dict(aggregated), dict(details)
 
 
 def build_effective_weights(feature_configs: dict, auto_weight: bool = True, exclude_meta_from_retrieval: bool = True) -> dict:

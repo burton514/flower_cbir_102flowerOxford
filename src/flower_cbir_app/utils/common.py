@@ -60,6 +60,37 @@ def blob_to_np(blob: bytes) -> np.ndarray:
     return np.load(buf, allow_pickle=False)
 
 
+# ── Lưu trữ mảng dạng raw bytes (gọn hơn .npy ~128 byte header/mảng) ──────────
+# Dùng cho ma trận feature lớn (N×D) và mảng image_id. Phải tự quản lý dtype/shape.
+
+def array_to_raw_blob(array: np.ndarray) -> bytes:
+    """Serialize mảng float32 thành raw bytes (không header).
+
+    Gọn hơn np.save khi lưu hàng nghìn vector. Caller phải lưu kèm shape + dtype.
+    """
+    arr = np.ascontiguousarray(array, dtype=np.float32)
+    return arr.tobytes()
+
+
+def raw_blob_to_matrix(blob: bytes, rows: int, dim: int) -> np.ndarray:
+    """Giải nén raw bytes thành ma trận float32 (rows × dim)."""
+    arr = np.frombuffer(blob, dtype=np.float32)
+    if rows * dim != arr.size:
+        # Fallback an toàn: suy ra rows từ dim nếu lệch metadata.
+        rows = arr.size // max(dim, 1)
+    return arr.reshape(rows, dim).copy()
+
+
+def ids_to_blob(ids) -> bytes:
+    """Serialize danh sách image_id thành raw int64 bytes."""
+    return np.ascontiguousarray(np.asarray(ids, dtype=np.int64)).tobytes()
+
+
+def blob_to_ids(blob: bytes) -> np.ndarray:
+    """Giải nén raw bytes thành mảng int64 image_id."""
+    return np.frombuffer(blob, dtype=np.int64).copy()
+
+
 def _json_default(obj):
     if hasattr(obj, 'item'):
         return obj.item()

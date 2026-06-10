@@ -39,37 +39,35 @@ from flower_cbir_app.features.texture_features import extract_glcm, extract_hog,
 def get_feature_catalog() -> List[FeatureSpec]:
     return [
         # ── COLOR ───────────────────────────────────────────────────────────────
-        # Màu là tín hiệu phân biệt loài hoa mạnh nhất → bật nhóm color làm chủ lực.
-        FeatureSpec('hsv_hist',     'HSV Histogram',           'color',   'Histogram màu HSV 16x6x3 = 288 bins.',       'chi_square', True,  '288', is_histogram=True, supports_chi_square=True, default_weight=1.5),
-        FeatureSpec('rgb_hist',     'RGB Histogram',           'color',   'Histogram màu RGB 8x8x8.',                   'cosine', False, '512', is_histogram=True, supports_chi_square=True),
+        FeatureSpec('hsv_hist',     'HSV Histogram',           'color',   'Histogram màu HSV 16x6x3 = 288 bins.',       'chi_square', True,  '288', is_histogram=True, supports_chi_square=True, default_weight=1.0),
+        FeatureSpec('rgb_hist',     'RGB Histogram',           'color',   'Histogram màu RGB 8x8x8.',                   'chi_square', False, '512', is_histogram=True, supports_chi_square=True),
         FeatureSpec('hue_hist',     'Hue Histogram',           'color',   'Histogram riêng kênh Hue.',                  'chi_square', True, '36',  is_histogram=True, supports_chi_square=True, default_weight=1.0),
-        FeatureSpec('dominant_colors', 'Dominant Colors',      'color',   '5 màu trội + tỉ lệ xuất hiện; feature heuristic, mặc định tắt.', 'cosine', False, '20'),
-        FeatureSpec('color_moments','Color Moments',           'color',   'Mean, std, skew trên từng kênh RGB foreground.', 'l2',   True,  '9', default_weight=1.0),
-        FeatureSpec('lab_moments',  'Lab Moments',             'color',   'Mean/std trên Lab foreground.',               'l2',     False, '6'),
+        FeatureSpec('dominant_colors', 'Dominant Colors',      'color',   '5 màu trội + tỉ lệ xuất hiện; feature heuristic.', 'cosine', True, '20', default_weight=1.0),
+        FeatureSpec('color_moments','Color Moments',           'color',   'Mean, std, skew trên từng kênh RGB foreground.', 'l2',   False,  '9'),
+        FeatureSpec('lab_moments',  'Lab Moments',             'color',   'Mean/std trên Lab foreground.',               'l2',     True, '6', default_weight=1.0),
         # ── COLOR MỚI ────────────────────────────────────────────────────────────
-        FeatureSpec('radial_color_hist', 'Radial Color Histogram', 'color', 'Histogram Hue theo 3 vành đồng tâm (tâm→rìa). Dim = rings×hue_bins = 36.', 'chi_square', True, '36', is_histogram=True, supports_chi_square=True, default_weight=1.5),
+        FeatureSpec('radial_color_hist', 'Radial Color Histogram', 'color', 'Histogram Hue theo 3 vành đồng tâm (tâm→rìa). Dim = rings×hue_bins = 36.', 'chi_square', False, '36', is_histogram=True, supports_chi_square=True),
         FeatureSpec('ccv',           'Color Coherence Vector',   'color',   'Tách pixel màu thành liền khối (coherent) và rải rác (incoherent). Dim = 2×12 = 24.', 'chi_square', False, '24', is_histogram=True, supports_chi_square=True),
-        FeatureSpec('circular_hue_stats', 'Circular Hue Stats',  'color',   'Thống kê Hue vòng tròn: circular mean, resultant length, circular std, saturation, value. Dim = 6.', 'l2', True, '6', default_weight=1.0),
+        FeatureSpec('circular_hue_stats', 'Circular Hue Stats',  'color',   'Thống kê Hue vòng tròn: circular mean, resultant length, circular std, saturation, value. Dim = 6.', 'l2', False, '6'),
         # ── SHAPE ───────────────────────────────────────────────────────────────
-        FeatureSpec('hu_moments',   'Hu Moments',              'shape',   '7 Hu moments trên mask nhị phân, sau log transform.', 'l2', True, '7', default_weight=0.8),
+        FeatureSpec('hu_moments',   'Hu Moments',              'shape',   '7 Hu moments trên mask nhị phân, sau log transform.', 'l2', False, '7'),
         FeatureSpec('geometric_shape','Geometric Shape',       'shape',   'Thuộc tính hình học cơ bản của vùng hoa.',   'l2',     False,  '13'),
-        FeatureSpec('contour_basic','Contour Basic',           'shape',   'Độ phức tạp contour và độ lồi cơ bản.',      'l2',     False, '5'),
-        FeatureSpec('radial_signature','Radial Signature',     'shape',   'Khoảng cách tâm-biên theo 36 hướng cố định.', 'cosine', False, '36'),
-        FeatureSpec('fourier_shape','Fourier Shape Descriptor','shape',   'Magnitude FFT của contour đã resample/center/normalize.', 'cosine', True, '32', default_weight=0.8),
-        FeatureSpec('symmetry_score','Symmetry Score',         'shape',   'Độ đối xứng theo overlap foreground với ảnh lật.', 'l2', False, '2'),
+        FeatureSpec('contour_basic','Contour Basic',           'shape',   'Độ phức tạp contour và độ lồi cơ bản.',      'l2',     True, '5', default_weight=1.0),
+        FeatureSpec('radial_signature','Radial Signature',     'shape',   'Khoảng cách tâm-biên theo 36 hướng cố định.', 'cosine', True, '36', default_weight=1.0),
+        FeatureSpec('fourier_shape','Fourier Shape Descriptor','shape',   'Magnitude FFT của contour đã resample/center/normalize.', 'cosine', True, '32', default_weight=1.0),
+        FeatureSpec('symmetry_score','Symmetry Score',         'shape',   'Độ đối xứng theo overlap foreground với ảnh lật.', 'l2', True, '2', default_weight=1.0),
         # ── SHAPE MỚI ────────────────────────────────────────────────────────────
-        FeatureSpec('rotational_symmetry', 'Rotational Symmetry', 'shape', 'Overlap khi xoay mask theo 8 góc đều nhau → ước lượng số cánh hoa. Dim = 8.', 'cosine', True, '8', default_weight=1.0),
+        FeatureSpec('rotational_symmetry', 'Rotational Symmetry', 'shape', 'Overlap khi xoay mask theo 8 góc đều nhau → ước lượng số cánh hoa. Dim = 8.', 'cosine', False, '8'),
         # ── TEXTURE / GRADIENT ──────────────────────────────────────────────────
         FeatureSpec('lbp',          'LBP Histogram',           'texture', 'LBP uniform P=24, R=3 trên foreground.',      'chi_square', True,  '26', is_histogram=True, supports_chi_square=True, default_weight=1.0),
-        FeatureSpec('glcm',         'GLCM Features',           'texture', 'Contrast, homogeneity, energy... từ GLCM foreground.', 'l2', True, '6', default_weight=0.8),
-        FeatureSpec('hog',          'HOG',                     'texture', 'Histogram of Oriented Gradients, block norm L2-Hys.', 'cosine', False, '324', is_histogram=True, supports_chi_square=False),
+        FeatureSpec('glcm',         'GLCM Features',           'texture', 'Contrast, homogeneity, energy... từ GLCM foreground.', 'l2', True, '6', default_weight=1.0),
+        FeatureSpec('hog',          'HOG',                     'texture', 'Histogram of Oriented Gradients, block norm L2-Hys.', 'l2', True, '324', is_histogram=True, supports_chi_square=False, default_weight=1.0),
         # ── EDGE ────────────────────────────────────────────────────────────────
-        FeatureSpec('edge_orientation_hist','Edge Orientation Histogram','edge','Histogram hướng tại pixel Canny edge.','chi_square',True,'36', is_histogram=True, supports_chi_square=True, default_weight=0.8),
-        FeatureSpec('canny_derived','Canny-derived Features',  'edge',    'Thống kê cấu trúc từ edge map Canny.',       'l2',     False, '6'),
-        FeatureSpec('sobel_hist',   'Sobel Gradient Histogram','edge',    'Histogram hướng gradient Sobel trên foreground.', 'cosine', False, '36', is_histogram=True, supports_chi_square=True),
+        FeatureSpec('edge_orientation_hist','Edge Orientation Histogram','edge','Histogram hướng tại pixel Canny edge.','chi_square',False,'36', is_histogram=True, supports_chi_square=True),
+        FeatureSpec('canny_derived','Canny-derived Features',  'edge',    'Thống kê cấu trúc từ edge map Canny.',       'l2',     True, '6', default_weight=1.0),
+        FeatureSpec('sobel_hist',   'Sobel Gradient Histogram','edge',    'Histogram hướng gradient Sobel trên foreground.', 'chi_square', True, '36', is_histogram=True, supports_chi_square=True, default_weight=1.0),
         # ── LOCAL (BoVW) ─────────────────────────────────────────────────────────
-        # Tắt mặc định: chậm (phải fit vocabulary) và với hoa thường yếu hơn color/shape.
-        FeatureSpec('sift_bovw',    'SIFT BoVW',               'local',   'Bag of Visual Words từ SIFT.',               'cosine', False, 'V', is_histogram=True, supports_chi_square=True),
+        FeatureSpec('sift_bovw',    'SIFT BoVW',               'local',   'Bag of Visual Words từ SIFT.',               'chi_square', True, 'V', is_histogram=True, supports_chi_square=True, default_weight=1.0),
         FeatureSpec('orb_bovw',     'ORB BoVW',                'local',   'BoVW từ ORB; dùng như baseline thực nghiệm cho descriptor nhị phân.', 'cosine', False, 'V', is_histogram=True, supports_chi_square=True),
         FeatureSpec('akaze_bovw',   'AKAZE BoVW',              'local',   'BoVW từ AKAZE; dùng như baseline thực nghiệm cho descriptor nhị phân.', 'cosine', False, 'V', is_histogram=True, supports_chi_square=True),
         FeatureSpec('brisk_bovw',   'BRISK BoVW',              'local',   'BoVW từ BRISK; dùng như baseline thực nghiệm cho descriptor nhị phân.', 'cosine', False, 'V', is_histogram=True, supports_chi_square=True),
