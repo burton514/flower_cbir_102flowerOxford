@@ -140,7 +140,7 @@ if active_tab == "Feature & Weight":
     st.markdown("### Danh sách feature")
     show_advanced = st.checkbox(
         "Hiển thị cả feature không bật tick mặc định",
-        value=False,
+        value=True,
         key="show_advanced_features",
         help="Tắt để chỉ hiện các feature được tick mặc định cho gọn; bật để xem/chỉnh toàn bộ feature.",
     )
