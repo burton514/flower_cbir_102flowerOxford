@@ -138,8 +138,16 @@ active_tab = st.session_state.active_tab
 
 if active_tab == "Feature & Weight":
     st.markdown("### Danh sách feature")
+    show_advanced = st.checkbox(
+        "Hiển thị cả feature không bật tick mặc định",
+        value=False,
+        key="show_advanced_features",
+        help="Tắt để chỉ hiện các feature được tick mặc định cho gọn; bật để xem/chỉnh toàn bộ feature.",
+    )
     groups = {}
     for feature in catalog:
+        if not show_advanced and not feature.enabled_by_default:
+            continue
         groups.setdefault(feature.group, []).append(feature)
 
     for group_name, items in groups.items():
