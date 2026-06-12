@@ -12,6 +12,11 @@ from PIL import Image
 
 
 def render_debug_bundle(bundle: dict):
+    """Hiển thị 1 debug_bundle lên giao diện Streamlit: ảnh -> biểu đồ -> bảng.
+
+    Ảnh xếp lưới 3 cột, mỗi plot vẽ bằng matplotlib, mỗi table render thành
+    dataframe. Dùng chung cho tab tiền xử lý / trích xuất / truy vấn.
+    """
     images = bundle.get('images', {})
     if images:
         keys = list(images.keys())
@@ -33,6 +38,11 @@ def render_debug_bundle(bundle: dict):
 
 
 def make_feature_config_dataframe(catalog: List, feature_state: dict) -> pd.DataFrame:
+    """Tạo bảng tổng hợp cấu hình mọi feature (nhóm, bật/tắt, distance, weight...).
+
+    Ghép thông tin tĩnh từ catalog với trạng thái hiện tại trong feature_state,
+    trả về DataFrame để hiển thị nhanh ở tab Feature & Weight.
+    """
     rows = []
     for feature in catalog:
         state = feature_state[feature.key]

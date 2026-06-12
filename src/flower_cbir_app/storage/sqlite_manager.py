@@ -31,34 +31,48 @@ _CACHE_LOCK = threading.Lock()
 
 
 def _cache_get(db_path: str, run_id: int, feature_key: str):
+    """Lấy (image_ids, matrix) đã cache cho 1 feature; None nếu chưa cache."""
     with _CACHE_LOCK:
         return _MATRIX_CACHE.get((db_path, run_id, feature_key))
 
 
 def _cache_put(db_path: str, run_id: int, feature_key: str, image_ids: np.ndarray, matrix: np.ndarray):
+    """Lưu ma trận feature vào cache mức module (sống qua các lần Streamlit rerun)."""
     with _CACHE_LOCK:
         _MATRIX_CACHE[(db_path, run_id, feature_key)] = (image_ids, matrix)
 
 
 def _cache_clear(db_path: str):
+    """Xóa toàn bộ cache của 1 database (gọi khi reset preprocess/extraction)."""
     with _CACHE_LOCK:
         for k in [key for key in _MATRIX_CACHE if key[0] == db_path]:
             _MATRIX_CACHE.pop(k, None)
 
 
 class SQLiteManager:
+    """Lớp truy cập SQLite — toàn bộ thao tác DB của project (SQL viết tay, KHÔNG ORM).
+
+    Quản lý 8 bảng: meta, preprocess_runs, extraction_runs, images,
+    preprocess_outputs, feature_configs, feature_matrices, evaluation_runs.
+    Mỗi lần Streamlit rerun lại tạo 1 instance mới nên kết nối là ngắn hạn; ma
+    trận feature được cache ở mức module (_MATRIX_CACHE) để khỏi đọc blob lại.
+    """
+
     def __init__(self, db_path: str):
+        """Mở/khởi tạo file SQLite tại db_path (tạo thư mục cha + bảng nếu chưa có)."""
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self):
+        """Tạo kết nối SQLite mới: row trả về dạng Row (truy cập theo tên cột) + bật FK."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys = ON')  # SQLite mặc định TẮT ràng buộc FK
         return conn
 
     def _init_db(self):
+        """Tạo toàn bộ bảng + index nếu chưa tồn tại và ghi schema_version vào meta."""
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -151,12 +165,14 @@ class SQLiteManager:
 
     # ── Schema version ────────────────────────────────────────────────────────
     def get_schema_version(self) -> int:
+        """Đọc số phiên bản schema đang lưu trong bảng meta (0 nếu chưa có)."""
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return int(row['value']) if row else 0
 
     # ── Runs ────────────────────────────────────────────────────────────────
     def create_preprocess_run(self, config: dict, summary: dict | None = None) -> int:
+        """Tạo 1 bản ghi preprocess_run mới (lưu config), trả về run_id vừa sinh."""
         with self._connect() as conn:
             cur = conn.execute(
                 'INSERT INTO preprocess_runs(config_json, summary_json) VALUES (?, ?)',
@@ -165,6 +181,7 @@ class SQLiteManager:
             return int(cur.lastrowid)
 
     def create_extraction_run(self, config: dict, summary: dict | None = None) -> int:
+        """Tạo 1 bản ghi extraction_run mới (lưu config), trả về run_id vừa sinh."""
         with self._connect() as conn:
             cur = conn.execute(
                 'INSERT INTO extraction_runs(config_json, summary_json) VALUES (?, ?)',
@@ -173,10 +190,12 @@ class SQLiteManager:
             return int(cur.lastrowid)
 
     def update_extraction_run_summary(self, run_id: int, summary: dict):
+        """Cập nhật phần summary_json (số ảnh, feature...) cho 1 extraction run."""
         with self._connect() as conn:
             conn.execute('UPDATE extraction_runs SET summary_json = ? WHERE run_id = ?', (serialize_json(summary), run_id))
 
     def get_extraction_run_config(self, run_id: int) -> dict:
+        """Đọc lại config (system + features) đã lưu của 1 extraction run."""
         with self._connect() as conn:
             row = conn.execute('SELECT config_json FROM extraction_runs WHERE run_id = ?', (run_id,)).fetchone()
         return deserialize_json(row['config_json']) if row else {}
@@ -209,6 +228,10 @@ class SQLiteManager:
 
     # ── Images ────────────────────────────────────────────────────────────────
     def upsert_image(self, file_path: str, file_name: str, label: str) -> int:
+        """Thêm ảnh vào bảng images, hoặc cập nhật nếu file_path đã có. Trả image_id.
+
+        file_path là khóa UNIQUE nên cùng 1 ảnh không bị tạo nhiều bản ghi.
+        """
         with self._connect() as conn:
             conn.execute(
                 '''
@@ -222,6 +245,7 @@ class SQLiteManager:
             return int(row['image_id'])
 
     def insert_preprocess_output(self, preprocess_run_id: int, image_id: int, normalized_path: str, mask_path: str, gray_path: str, edge_path: str, debug_json: dict):
+        """Lưu ĐƯỜNG DẪN 4 ảnh đã tiền xử lý của 1 ảnh (ảnh nằm trên đĩa, DB chỉ giữ path)."""
         with self._connect() as conn:
             conn.execute(
                 '''
@@ -257,6 +281,11 @@ class SQLiteManager:
     def insert_feature_config(self, extraction_run_id: int, feature_key: str, group_name: str, enabled: bool,
                               distance_type: str, weight: float, is_meta: bool, mean, std, vocab,
                               d_min: float = 0.0, d_max: float = 1.0, extra: dict | None = None):
+        """Lưu cấu hình + tham số chuẩn hóa của 1 feature trong 1 extraction run.
+
+        Gồm distance_type, weight, is_meta, thang đo cố định (d_min/d_max) và các
+        blob mean/std (z-score), vocab (BoVW) để online tái dùng đúng tham số.
+        """
         with self._connect() as conn:
             conn.execute(
                 '''
@@ -281,6 +310,11 @@ class SQLiteManager:
             )
 
     def get_extraction_feature_configs(self, extraction_run_id: int) -> Dict[str, dict]:
+        """Đọc config mọi feature của 1 run, trả dict {feature_key: {...}}.
+
+        Tự giải nén các blob mean/std/vocab về numpy. Đây là dữ liệu fusion/online
+        cần để chuẩn hóa và chọn distance.
+        """
         with self._connect() as conn:
             rows = conn.execute('SELECT * FROM feature_configs WHERE extraction_run_id = ?', (extraction_run_id,)).fetchall()
         out = {}
@@ -338,6 +372,7 @@ class SQLiteManager:
         return image_ids, matrix
 
     def _images_lookup(self) -> Dict[int, dict]:
+        """Trả map image_id -> {file_path, file_name, label} cho toàn bộ ảnh (1 truy vấn)."""
         with self._connect() as conn:
             rows = conn.execute('SELECT image_id, file_path, file_name, label FROM images').fetchall()
         return {int(r['image_id']): {'file_path': r['file_path'], 'file_name': r['file_name'], 'label': r['label']} for r in rows}
@@ -365,26 +400,35 @@ class SQLiteManager:
         return pd.DataFrame(data)
 
     def get_all_feature_matrices(self, extraction_run_id: int) -> Dict[str, pd.DataFrame]:
+        """Trả về toàn bộ feature matrix của 1 run dưới dạng {feature_key: DataFrame}."""
         configs = self.get_extraction_feature_configs(extraction_run_id)
         return {k: self.get_feature_matrix(extraction_run_id, k) for k in configs.keys()}
 
     # ── Latest run ids ────────────────────────────────────────────────────────
     def get_latest_preprocess_run_id(self) -> Optional[int]:
+        """Lấy run_id của lần tiền xử lý mới nhất (None nếu chưa có)."""
         with self._connect() as conn:
             row = conn.execute('SELECT run_id FROM preprocess_runs ORDER BY run_id DESC LIMIT 1').fetchone()
             return int(row['run_id']) if row else None
 
     def get_latest_extraction_run_id(self) -> Optional[int]:
+        """Lấy run_id của lần trích xuất mới nhất (None nếu chưa có). Online/đánh giá dùng run này."""
         with self._connect() as conn:
             row = conn.execute('SELECT run_id FROM extraction_runs ORDER BY run_id DESC LIMIT 1').fetchone()
             return int(row['run_id']) if row else None
 
     def list_images(self, limit: int = 100) -> List[dict]:
+        """Liệt kê các ảnh mới nhất trong bảng images (tối đa `limit` dòng)."""
         with self._connect() as conn:
             rows = conn.execute('SELECT * FROM images ORDER BY image_id DESC LIMIT ?', (limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def insert_evaluation_run(self, extraction_run_id: int, metrics: dict, separation: dict):
+        """Lưu kết quả 1 lần đánh giá (metrics + class separation) vào DB.
+
+        Lưu ý: hiện app.py chưa gọi hàm này — kết quả đánh giá mới chỉ giữ trong
+        session_state. Có thể gọi ở đây nếu muốn lưu lịch sử đánh giá.
+        """
         with self._connect() as conn:
             conn.execute(
                 'INSERT INTO evaluation_runs(extraction_run_id, metrics_json, separation_json) VALUES (?, ?, ?)',

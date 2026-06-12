@@ -7,6 +7,11 @@ import numpy as np
 
 
 def zscore_apply(vector: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """Áp z-score lên 1 vector query bằng mean/std đã đo sẵn lúc extract.
+
+    Online dùng đúng mean/std của dataset (lưu trong feature_config) để query
+    nằm cùng thang đo với các ảnh trong DB, không tự tính lại theo riêng query.
+    """
     return (vector - mean) / (std + 1e-12)
 
 
@@ -38,6 +43,13 @@ def resolve_distance_type(config: dict) -> str:
 
 
 def compute_distance(a: np.ndarray, b: np.ndarray, metric: str) -> float:
+    """Khoảng cách giữa HAI vector theo metric chọn (l2 / cosine / chi_square).
+
+    - l2        : khoảng cách Euclid (càng nhỏ càng giống).
+    - cosine    : 1 - cos(góc), clip [0,2]; vector 0 thì trả 1.0.
+    - chi_square: ½ Σ (a-b)²/(a+b), chỉ cho histogram không âm đã L1-normalize.
+    Trả về 1 số float. Phiên bản 1-query-nhiều-ảnh xem distances_to_matrix.
+    """
     a = np.asarray(a, dtype=np.float32).ravel()
     b = np.asarray(b, dtype=np.float32).ravel()
     if metric == 'l2':
@@ -226,6 +238,16 @@ def aggregate_fixed_scale_with_details(dist_by_feature: dict, scale_by_feature: 
 
 
 def build_effective_weights(feature_configs: dict, auto_weight: bool = True, exclude_meta_from_retrieval: bool = True) -> dict:
+    """Tính trọng số cuối cùng của mỗi feature dùng cho fusion (tổng = 1).
+
+    - exclude_meta_from_retrieval: loại các feature meta khỏi việc xếp hạng.
+    - auto_weight=True : chia đều theo NHÓM trước (mỗi nhóm 1/số_nhóm), rồi chia
+      đều trong nhóm -> mọi nhóm đóng góp ngang nhau dù số feature khác nhau.
+    - auto_weight=False: dùng weight tay người chỉnh, normalize tổng = 1 (nếu
+      tổng <= 0 thì chia đều).
+
+    Trả về dict {feature_key: weight}. Bản theo Fisher ratio xem build_fisher_weights.
+    """
     active = {k: v for k, v in feature_configs.items() if v['enabled'] and not (exclude_meta_from_retrieval and v['is_meta'])}
     if not active:
         return {}

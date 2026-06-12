@@ -13,6 +13,11 @@ from flower_cbir_app.utils.common import gray_to_rgb
 
 
 def load_input_image(path: str | None = None, file_bytes: bytes | None = None) -> np.ndarray:
+    """Nạp ảnh từ đường dẫn hoặc bytes, trả về mảng RGBA (4 kênh).
+
+    Luôn convert sang RGBA để bước sau đọc được kênh alpha (tách nền). Cần đúng
+    một trong hai: `path` (ảnh trên đĩa) hoặc `file_bytes` (ảnh upload).
+    """
     if path is not None:
         image = Image.open(path)
     elif file_bytes is not None:
@@ -23,6 +28,11 @@ def load_input_image(path: str | None = None, file_bytes: bytes | None = None) -
 
 
 def try_rembg(rgba_image: np.ndarray) -> np.ndarray:
+    """Tách nền bằng model rembg (deep learning), trả về RGBA có alpha thật.
+
+    Báo lỗi rõ ràng nếu thư viện rembg/onnxruntime chưa được cài. Đây là cách
+    tách nền chính; nếu không dùng được sẽ fallback sang tách nền trắng đơn giản.
+    """
     try:
         from rembg import remove
     except Exception as exc:
@@ -34,12 +44,20 @@ def try_rembg(rgba_image: np.ndarray) -> np.ndarray:
 
 
 def _has_useful_alpha(alpha: np.ndarray) -> bool:
-    # Ảnh RGB convert sang RGBA sẽ có alpha=255 toàn ảnh -> không có thông tin tách nền thật.
+    """Kiểm tra kênh alpha có chứa thông tin tách nền thật hay không.
+
+    Ảnh RGB convert sang RGBA sẽ có alpha=255 toàn ảnh (đặc) -> không hữu ích.
+    Trả về True nếu có pixel alpha < 250 (tức có vùng trong suốt thật).
+    """
     return bool(np.any(alpha < 250))
 
 
 def _fallback_white_background_mask(rgb: np.ndarray) -> np.ndarray:
-    # Phương án cứu hộ nhẹ khi rembg thất bại hoặc không có alpha hữu ích.
+    """Mask cứu hộ: coi vùng gần trắng (>245 cả 3 kênh) là nền, còn lại là vật.
+
+    Dùng khi rembg thất bại hoặc ảnh không có alpha hữu ích. Trả về mask uint8
+    (0 = nền, 255 = vật). Chỉ hợp với ảnh nền trắng đơn giản.
+    """
     bg = (
         (rgb[..., 0] > 245) &
         (rgb[..., 1] > 245) &
@@ -49,6 +67,12 @@ def _fallback_white_background_mask(rgb: np.ndarray) -> np.ndarray:
 
 
 def build_initial_mask(rgba_image: np.ndarray, use_rembg: bool, alpha_threshold: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Tạo mask thô tách vật khỏi nền (chưa làm sạch).
+
+    Thứ tự ưu tiên: nếu ảnh đã có alpha thật thì dùng luôn; nếu chưa và
+    use_rembg=True thì gọi rembg; nếu vẫn không có thì fallback nền trắng.
+    Mask = (alpha >= alpha_threshold). Trả về (rgba đã cập nhật, mask uint8).
+    """
     rgba = rgba_image.copy()
     alpha = rgba[..., 3]
 
@@ -68,6 +92,8 @@ def build_initial_mask(rgba_image: np.ndarray, use_rembg: bool, alpha_threshold:
 
 
 def _remove_small_holes(mask_bool: np.ndarray, area_threshold: int) -> np.ndarray:
+    """Lấp các lỗ nhỏ bên trong vật (bù chỗ thủng do tách nền). Wrapper xử lý
+    khác biệt tên tham số giữa các phiên bản skimage."""
     try:
         return morphology.remove_small_holes(mask_bool, max_size=area_threshold)
     except TypeError:
@@ -75,12 +101,20 @@ def _remove_small_holes(mask_bool: np.ndarray, area_threshold: int) -> np.ndarra
 
 
 def _remove_small_objects(mask_bool: np.ndarray, min_size: int) -> np.ndarray:
+    """Xóa các đốm nhỏ rời rạc (nhiễu nền). Wrapper xử lý khác biệt tên tham số
+    giữa các phiên bản skimage."""
     try:
         return morphology.remove_small_objects(mask_bool, max_size=min_size)
     except TypeError:
         return morphology.remove_small_objects(mask_bool, min_size=min_size)
 
 def clean_mask(mask: np.ndarray, kernel_size: int, min_area_ratio: float) -> np.ndarray:
+    """Làm sạch mask thô: lấp lỗ -> xóa đốm nhỏ -> đóng/mở hình thái học ->
+    giữ DUY NHẤT thành phần liên thông lớn nhất.
+
+    Kết quả là mask gọn của 1 vật chính, loại rác quanh nền. Nếu sau khi làm
+    sạch mà rỗng thì trả lại mask gốc để không mất ảnh.
+    """
     mask_bool = mask > 0
     mask_bool = _remove_small_holes(mask_bool, area_threshold=max(64, kernel_size * kernel_size * 4))
     min_size = max(32, int(mask.size * min_area_ratio))
@@ -108,6 +142,11 @@ def clean_mask(mask: np.ndarray, kernel_size: int, min_area_ratio: float) -> np.
 
 
 def compute_bbox(mask: np.ndarray, margin_ratio: float) -> Tuple[int, int, int, int]:
+    """Tính hộp bao (bounding box) quanh vùng vật trong mask, có nới biên.
+
+    Biên được nới thêm margin_ratio * cạnh-dài-nhất rồi kẹp trong khung ảnh.
+    Trả về (x0, y0, x1, y1). Nếu mask rỗng thì trả về toàn ảnh.
+    """
     ys, xs = np.where(mask > 0)
     if len(xs) == 0 or len(ys) == 0:
         h, w = mask.shape[:2]
@@ -127,6 +166,7 @@ def compute_bbox(mask: np.ndarray, margin_ratio: float) -> Tuple[int, int, int, 
 
 
 def crop_by_bbox(image_rgba: np.ndarray, mask: np.ndarray, bbox) -> Tuple[np.ndarray, np.ndarray]:
+    """Cắt ảnh RGBA và mask theo bbox (x0,y0,x1,y1). Trả về (crop_rgba, crop_mask)."""
     x0, y0, x1, y1 = bbox
     return image_rgba[y0:y1, x0:x1], mask[y0:y1, x0:x1]
 
@@ -138,6 +178,13 @@ def center_and_scale_object(
     target_object_ratio: float,
     white_background: bool = True,
 ):
+    """Resize vật để chiếm `target_object_ratio` khung rồi đặt vào CHÍNH GIỮA
+    canvas vuông `target_size` x `target_size`.
+
+    Chuẩn hóa kích thước + vị trí để mọi ảnh cùng tỉ lệ và căn giữa (giúp so
+    sánh feature công bằng). Nền lấp trắng (hoặc đen nếu white_background=False).
+    Trả về (canvas_rgb, canvas_mask). Mask rỗng thì trả canvas trống.
+    """
     ys, xs = np.where(crop_mask > 0)
     h, w = crop_mask.shape
 
@@ -201,6 +248,11 @@ def center_and_scale_object(
 
 
 def build_gray_and_edge(image_rgb: np.ndarray, mask: np.ndarray, canny_low: int = 80, canny_high: int = 160) -> Tuple[np.ndarray, np.ndarray]:
+    """Sinh ảnh xám và ảnh biên Canny từ ảnh chuẩn hóa.
+
+    Vùng nền (mask==0) được đặt trắng ở ảnh xám và bỏ biên (=0) ở ảnh edge để
+    biên chỉ phản ánh đường nét của vật, không lẫn biên nền. Trả về (gray, edge).
+    """
     gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
     masked_gray = gray.copy()
     masked_gray[mask == 0] = 255
@@ -212,6 +264,16 @@ def build_gray_and_edge(image_rgb: np.ndarray, mask: np.ndarray, canny_low: int 
 
 
 def preprocess_image(path: str | None, config: dict, file_bytes: bytes | None = None) -> Dict[str, np.ndarray | dict]:
+    """Toàn bộ pipeline tiền xử lý 1 ảnh, từ ảnh gốc tới 4 ảnh chuẩn hóa.
+
+    Chuỗi bước: load -> build_initial_mask (rembg/fallback) -> clean_mask ->
+    compute_bbox -> crop -> center_and_scale_object (256x256, căn giữa) ->
+    build_gray_and_edge. Đồng thời tính các chỉ số chất lượng (occupancy,
+    centroid_offset, cờ bad_mask) và gom ảnh trung gian vào debug_bundle.
+
+    Dùng chung cho cả offline (extract toàn dataset) lẫn online (xử lý query).
+    Trả về dict: image_rgb, mask, gray, edge, debug_bundle, stats.
+    """
     rgba = load_input_image(path=path, file_bytes=file_bytes)
 
     rgba_bg, mask0 = build_initial_mask(

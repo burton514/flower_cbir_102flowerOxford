@@ -12,6 +12,7 @@ from flower_cbir_app.core.fusion import (
 
 
 def _get_fusion_config(db, extraction_run_id: int) -> dict:
+    """Đọc phần config 'fusion' (auto_weight, exclude_meta...) của extraction run."""
     run_config = db.get_extraction_run_config(extraction_run_id) if hasattr(db, 'get_extraction_run_config') else {}
     system_config = run_config.get('system', run_config) if isinstance(run_config, dict) else {}
     return system_config.get('fusion', {}) if isinstance(system_config, dict) else {}
@@ -38,6 +39,16 @@ def _pairwise_feature_distance(vectors: list[np.ndarray], metric: str) -> np.nda
 
 
 def evaluate_class_separation(db, extraction_run_id: int) -> dict:
+    """Đo mức độ TÁCH LỚP của không gian đặc trưng fused (không cần truy vấn).
+
+    Dựng ma trận khoảng cách fused N×N rồi tính:
+      - intra/inter_class_distance: khoảng cách trung bình trong-lớp và giữa-lớp.
+      - separation_ratio = inter/intra (càng lớn càng tách tốt).
+      - silhouette: điểm silhouette trên ma trận khoảng cách precomputed.
+      - fisher_ratio = S_B / S_W trên vector nối toàn bộ feature.
+    Trả về dict các chỉ số này + số mẫu/feature. Bổ trợ cho retrieval metrics:
+    đánh giá feature có gom cùng lớp / tách khác lớp tốt không.
+    """
     configs = db.get_extraction_feature_configs(extraction_run_id)
     fusion_config = _get_fusion_config(db, extraction_run_id)
     weights = build_effective_weights(

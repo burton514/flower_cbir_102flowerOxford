@@ -14,18 +14,21 @@ from PIL import Image
 
 @dataclass
 class DebugBundle:
+    """Gói dữ liệu debug để hiển thị trên UI: ảnh, biểu đồ, bảng số liệu."""
     images: Dict[str, np.ndarray]
     plots: Dict[str, dict]
     tables: Dict[str, dict]
 
 
 def ensure_dir(path) -> Path:
+    """Tạo thư mục (kể cả cha) nếu chưa có, rồi trả về Path của nó."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def image_to_uint8(image: np.ndarray) -> np.ndarray:
+    """Ép ảnh về kiểu uint8 [0,255] (clip giá trị tràn) để hiển thị/lưu."""
     image = np.asarray(image)
     if image.dtype == np.uint8:
         return image
@@ -34,6 +37,10 @@ def image_to_uint8(image: np.ndarray) -> np.ndarray:
 
 
 def gray_to_rgb(gray: np.ndarray) -> np.ndarray:
+    """Chuyển ảnh xám 1 kênh sang RGB 3 kênh (ảnh đã RGB thì giữ nguyên).
+
+    Dùng để nhét ảnh xám/mask vào debug_bundle (UI luôn render dạng RGB).
+    """
     gray = image_to_uint8(gray)
     if gray.ndim == 2:
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
@@ -41,6 +48,10 @@ def gray_to_rgb(gray: np.ndarray) -> np.ndarray:
 
 
 def normalize_vector(vector: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Chuẩn hóa L1: chia vector cho tổng các phần tử (giữ nguyên nếu tổng ~0).
+
+    Dùng cho mọi histogram để tổng = 1, không phụ thuộc số pixel/keypoint.
+    """
     vector = np.asarray(vector, dtype=np.float32).ravel()
     s = np.sum(vector)
     if s > eps:
@@ -49,12 +60,14 @@ def normalize_vector(vector: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 
 def np_to_blob(array: np.ndarray) -> bytes:
+    """Serialize mảng numpy thành bytes dạng .npy (có header) để lưu vào DB."""
     buf = io.BytesIO()
     np.save(buf, np.asarray(array), allow_pickle=False)
     return buf.getvalue()
 
 
 def blob_to_np(blob: bytes) -> np.ndarray:
+    """Giải nén bytes .npy (do np_to_blob tạo) trở lại mảng numpy."""
     buf = io.BytesIO(blob)
     buf.seek(0)
     return np.load(buf, allow_pickle=False)
@@ -92,6 +105,7 @@ def blob_to_ids(blob: bytes) -> np.ndarray:
 
 
 def _json_default(obj):
+    """Bộ chuyển đổi cho json.dumps: ép kiểu numpy (scalar/array) về kiểu Python."""
     if hasattr(obj, 'item'):
         return obj.item()
     if hasattr(obj, 'tolist'):
@@ -100,16 +114,19 @@ def _json_default(obj):
 
 
 def serialize_json(data: dict) -> str:
+    """Đổi dict (có thể chứa numpy) thành chuỗi JSON để lưu vào cột TEXT của DB."""
     return json.dumps(data, ensure_ascii=False, default=_json_default)
 
 
 def deserialize_json(data: Optional[str]) -> dict:
+    """Đổi chuỗi JSON từ DB trở lại dict (trả {} nếu rỗng/None)."""
     if not data:
         return {}
     return json.loads(data)
 
 
 def parse_label_from_filename(file_name: str) -> str:
+    """Lấy nhãn = phần trước dấu '_' đầu tiên trong tên file (vd: 'rose_001'->'rose')."""
     stem = Path(file_name).stem
     if '_' in stem:
         return stem.split('_')[0]
@@ -155,10 +172,12 @@ def parse_label_from_path(file_path: str | Path, dataset_root: str | Path | None
     return parse_label_from_filename(path.name)
 
 def read_image_rgb(path: str) -> np.ndarray:
+    """Đọc ảnh từ đĩa và trả về mảng RGB 3 kênh."""
     image = Image.open(path)
     return np.array(image.convert('RGB'))
 
 
 def read_image_rgba(path: str) -> np.ndarray:
+    """Đọc ảnh từ đĩa và trả về mảng RGBA 4 kênh (kèm alpha)."""
     image = Image.open(path)
     return np.array(image.convert('RGBA'))

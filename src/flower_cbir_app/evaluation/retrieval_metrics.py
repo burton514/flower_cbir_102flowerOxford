@@ -13,16 +13,24 @@ from flower_cbir_app.core.fusion import (
 
 
 def _precision_at_k(relevance):
+    """Precision@k = tỉ lệ ảnh đúng trong k kết quả trả về (mean mảng 0/1)."""
     return float(np.mean(relevance)) if len(relevance) else 0.0
 
 
 def _recall_at_k(relevance, total_relevant):
+    """Recall@k = số ảnh đúng trong top-k / tổng số ảnh đúng có trong DB."""
     if total_relevant <= 0:
         return 0.0
     return float(np.sum(relevance) / total_relevant)
 
 
 def _average_precision_at_k(relevance, total_relevant, k=5):
+    """Average Precision@k — trung bình precision tại mỗi vị trí có ảnh đúng.
+
+    Cộng (số hit tích lũy / vị trí) ở mỗi kết quả đúng, chia cho
+    min(total_relevant, k). Thưởng việc xếp ảnh đúng lên đầu. MAP = trung bình
+    AP trên mọi query.
+    """
     if total_relevant <= 0:
         return 0.0
     hits = 0
@@ -35,6 +43,11 @@ def _average_precision_at_k(relevance, total_relevant, k=5):
 
 
 def _mrr_at_k(relevance):
+    """MRR = 1 / vị trí của ảnh ĐÚNG đầu tiên trong kết quả (0 nếu không có).
+
+    Đo hệ thống đưa được 1 ảnh đúng lên sớm tới mức nào. MRR cuối = trung bình
+    trên mọi query.
+    """
     for idx, rel in enumerate(relevance, start=1):
         if rel:
             return float(1.0 / idx)
@@ -42,6 +55,7 @@ def _mrr_at_k(relevance):
 
 
 def _get_fusion_config(db, extraction_run_id: int) -> dict:
+    """Đọc phần config 'fusion' (auto_weight, exclude_meta...) của extraction run."""
     run_config = db.get_extraction_run_config(extraction_run_id) if hasattr(db, 'get_extraction_run_config') else {}
     system_config = run_config.get('system', run_config) if isinstance(run_config, dict) else {}
     return system_config.get('fusion', {}) if isinstance(system_config, dict) else {}
@@ -53,6 +67,16 @@ def _compute_distance_matrix(X: np.ndarray, metric: str) -> np.ndarray:
 
 
 def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=None) -> dict:
+    """Đánh giá chất lượng truy hồi trên TOÀN dataset (mỗi ảnh làm 1 query).
+
+    Cách làm: dựng ma trận khoảng cách fused N×N (mỗi feature: distance matrix ->
+    normalize min-max -> nhân trọng số -> cộng), đặt đường chéo = vô cực để loại
+    chính ảnh query. Với mỗi ảnh: lấy top-5, đối chiếu nhãn để tính
+    Precision/Recall/MAP/MRR @5. Bỏ qua query mà nhãn của nó chỉ có 1 ảnh.
+
+    Trả về dict gồm 4 metric trung bình toàn cục + bảng per_label + số query
+    đã đánh giá/bỏ qua. KHÔNG lưu vào DB (kết quả chỉ về session_state của UI).
+    """
     configs = db.get_extraction_feature_configs(extraction_run_id)
     fusion_config = _get_fusion_config(db, extraction_run_id)
     weights = build_effective_weights(

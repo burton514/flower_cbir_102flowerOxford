@@ -7,6 +7,13 @@ import numpy as np
 
 @dataclass
 class FeatureResult:
+    """Kết quả trả về của MỌI hàm extract_* — hộp chứa dữ liệu (không phải ORM).
+
+    - vector: vector đặc trưng (np.ndarray) dùng để so khớp.
+    - debug_bundle: ảnh/biểu đồ/bảng để hiển thị debug trên UI (không vào DB).
+    - extra: thông tin phụ tùy feature.
+    Nhờ khuôn chung này, pipeline xử lý mọi feature theo cùng một cách.
+    """
     vector: np.ndarray
     debug_bundle: dict
     extra: dict
@@ -14,6 +21,12 @@ class FeatureResult:
 
 @dataclass
 class FeatureSpec:
+    """Bản khai metadata TĨNH của một feature (tên, nhóm, distance, cờ...).
+
+    Không gắn với DB. registry.get_feature_catalog() trả về danh sách các spec
+    này; UI đọc để vẽ checkbox, pipeline đọc để chọn cách chuẩn hóa (is_histogram
+    -> L1, ngược lại -> z-score) và distance hợp lệ.
+    """
     key: str
     name: str
     group: str

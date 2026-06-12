@@ -7,6 +7,11 @@ from flower_cbir_app.features.base import FeatureResult
 
 
 def _main_contour(mask: np.ndarray):
+    """Tìm đường viền ngoài lớn nhất của vật trong mask.
+
+    Trả về contour có diện tích lớn nhất (vật chính). Nếu không có contour nào
+    thì trả về 1 điểm giả để các hàm gọi không bị lỗi.
+    """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return np.array([[[0, 0]]], dtype=np.int32)
@@ -14,8 +19,11 @@ def _main_contour(mask: np.ndarray):
 
 
 def extract_hu_moments(mask: np.ndarray) -> FeatureResult:
-    # Hu Moments là shape descriptor, vì vậy phải tính trên mask nhị phân
-    # với binaryImage=True thay vì coi mask 0/255 như ảnh cường độ xám.
+    """7 Hu moments của hình dạng — bất biến với dịch, xoay, co giãn (7 chiều).
+
+    Tính trên mask nhị phân (binaryImage=True), rồi nén bằng -sign*log10 để các
+    giá trị nằm cùng thang đo. Mô tả hình tổng thể, không phụ thuộc vị trí/hướng.
+    """
     mask_bin = (mask > 0).astype(np.uint8)
     moments = cv2.moments(mask_bin, binaryImage=True)
     hu = cv2.HuMoments(moments).flatten()
@@ -24,6 +32,14 @@ def extract_hu_moments(mask: np.ndarray) -> FeatureResult:
 
 
 def extract_geometric_shape(mask: np.ndarray) -> FeatureResult:
+    """13 chỉ số hình học của vật (13 chiều).
+
+    Gồm: area_ratio, perimeter_norm, aspect_ratio, circularity (độ tròn),
+    solidity (đặc/rỗng), extent, eccentricity (độ dẹt elip), equivalent_diameter,
+    hull_area_ratio, hull_perimeter_norm, convexity, compactness, roundness.
+    Các đại lượng theo pixel đều chuẩn hóa theo kích thước canvas để bớt phụ
+    thuộc scale tuyệt đối. Là feature shape chủ lực, dễ giải thích.
+    """
     contour = _main_contour(mask)
     area = float(cv2.contourArea(contour))
     perimeter = float(cv2.arcLength(contour, True))
@@ -68,6 +84,11 @@ def extract_geometric_shape(mask: np.ndarray) -> FeatureResult:
 
 
 def extract_contour_basic(mask: np.ndarray) -> FeatureResult:
+    """5 chỉ số cơ bản về độ phức tạp/lồi lõm của đường viền (5 chiều).
+
+    Vector = [số điểm contour, số điểm sau xấp xỉ đa giác, roughness (chu vi/chu
+    vi bao lồi), số điểm lõm, area/hull_area]. Đo mức "răng cưa/lởm chởm" của rìa.
+    """
     contour = _main_contour(mask)
     epsilon = 0.01 * cv2.arcLength(contour, True)
     approx = cv2.approxPolyDP(contour, epsilon, True)
@@ -84,6 +105,12 @@ def extract_contour_basic(mask: np.ndarray) -> FeatureResult:
 
 
 def extract_radial_signature(mask: np.ndarray, bins: int = 36) -> FeatureResult:
+    """Chữ ký bán kính: khoảng cách từ tâm tới rìa theo `bins` hướng góc (36 chiều).
+
+    Mỗi bin lấy bán kính lớn nhất của contour trong cung góc đó, rồi chuẩn hóa
+    theo bán kính max. Mô tả "đường bao" của vật theo góc — phân biệt hình dạng
+    tròn/sao/dài. Bất biến scale nhờ chuẩn hóa.
+    """
     contour = _main_contour(mask)
     pts = contour.reshape(-1, 2).astype(np.float32)
     if len(pts) == 0:
@@ -108,6 +135,11 @@ def extract_radial_signature(mask: np.ndarray, bins: int = 36) -> FeatureResult:
 
 
 def _resample_closed_contour(points: np.ndarray, n_points: int = 128) -> np.ndarray:
+    """Lấy mẫu lại đường viền kín thành đúng `n_points` điểm cách đều theo chiều dài.
+
+    Nội suy tuyến tính theo độ dài cung để mọi contour có cùng số điểm phân bố
+    đều — điều kiện cần trước khi tính Fourier descriptor.
+    """
     if len(points) < 2:
         return np.zeros((n_points, 2), dtype=np.float32)
     pts = np.asarray(points, dtype=np.float32)
@@ -124,6 +156,12 @@ def _resample_closed_contour(points: np.ndarray, n_points: int = 128) -> np.ndar
 
 
 def extract_fourier_shape(mask: np.ndarray, coeffs: int = 32) -> FeatureResult:
+    """Fourier descriptor của đường viền (32 chiều).
+
+    Biểu diễn contour dưới dạng số phức rồi lấy biên độ FFT của `coeffs` tần số
+    đầu (bỏ DC), chuẩn hóa theo norm. Tần thấp = hình tổng thể, tần cao = chi
+    tiết rìa. Bất biến dịch/xoay/scale, mô tả hình dạng mượt và compact.
+    """
     contour = _main_contour(mask).reshape(-1, 2).astype(np.float32)
     if len(contour) < 4:
         return FeatureResult(np.zeros(coeffs, dtype=np.float32), {'images': {}, 'plots': {}, 'tables': {}}, {})
@@ -139,7 +177,10 @@ def extract_fourier_shape(mask: np.ndarray, coeffs: int = 32) -> FeatureResult:
 
 
 def _foreground_overlap_score(a: np.ndarray, b: np.ndarray) -> float:
-    # Jaccard overlap trên foreground, tránh việc nền trắng lớn làm score giả cao.
+    """Độ trùng khớp Jaccard giữa 2 mask foreground = giao / hợp ∈ [0,1].
+
+    Chỉ tính trên foreground để nền trắng lớn không làm điểm trùng giả cao.
+    """
     a = a.astype(bool)
     b = b.astype(bool)
     union = np.logical_or(a, b).sum()
@@ -150,6 +191,11 @@ def _foreground_overlap_score(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def extract_symmetry_score(mask: np.ndarray) -> FeatureResult:
+    """Điểm đối xứng gương trái-phải và trên-dưới (2 chiều).
+
+    Lật mask theo trục dọc/ngang rồi đo overlap Jaccard với bản gốc. Vector =
+    [left_right, up_down], mỗi giá trị ∈ [0,1], càng cao càng đối xứng.
+    """
     mask_bin = mask > 0
     lr = _foreground_overlap_score(mask_bin, np.fliplr(mask_bin))
     ud = _foreground_overlap_score(mask_bin, np.flipud(mask_bin))

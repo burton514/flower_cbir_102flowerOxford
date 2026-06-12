@@ -17,6 +17,21 @@ from flower_cbir_app.features.registry import EXTRACTORS, LOCAL_FEATURE_MAP
 
 
 def run_query(system_config: dict, feature_state: dict, db, query_image_path: str | None = None, query_file_bytes: bytes | None = None, top_k: int = 5) -> dict:
+    """PHA ONLINE — Tìm top-K ảnh giống nhất với 1 ảnh query.
+
+    Nhận query từ đường dẫn (ảnh trong dataset) hoặc bytes (ảnh upload). Các bước:
+      1. Lấy extraction_run mới nhất + dùng LẠI config preprocessing/fusion của
+         run đó (tránh lệch pipeline nếu user đã chỉnh config sau khi extract).
+      2. preprocess_image(query) -> trích từng feature đang bật -> áp z-score/BoVW
+         bằng đúng mean/std/vocab đã lưu để query cùng thang đo với DB.
+      3. Mỗi feature: đọc ma trận N×D đã lưu (có cache) -> distances_to_matrix
+         (1 query tới N ảnh) -> chuẩn hóa min/max CỐ ĐỊNH -> nhân trọng số -> cộng.
+      4. Xếp hạng theo distance tăng dần, bỏ chính ảnh query nếu nó nằm trong DB,
+         lấy top_k kèm metadata và chi tiết đóng góp từng feature.
+
+    Trả về dict gồm results (top-K), per_feature_contributions, weights và
+    debug_bundle của ảnh query để render trên UI.
+    """
     extraction_run_id = db.get_latest_extraction_run_id()
     if extraction_run_id is None:
         raise ValueError('Chưa có extraction run trong SQLite.')

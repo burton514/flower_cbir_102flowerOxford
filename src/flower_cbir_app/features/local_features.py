@@ -9,6 +9,7 @@ from flower_cbir_app.utils.common import normalize_vector
 
 
 def _get_detector(name: str):
+    """Tạo bộ phát hiện+mô tả keypoint của OpenCV theo tên (sift/orb/akaze/brisk)."""
     name = name.lower()
     if name == 'sift':
         if hasattr(cv2, 'SIFT_create'):
@@ -24,6 +25,11 @@ def _get_detector(name: str):
 
 
 def get_descriptor_dim(method: str) -> int:
+    """Số chiều của 1 descriptor theo phương pháp (SIFT=128, ORB=32, AKAZE=61...).
+
+    Hỏi trực tiếp detector; nếu không được thì dùng giá trị mặc định đã biết.
+    Dùng để khởi tạo từ điển BoVW đúng chiều.
+    """
     detector = _get_detector(method)
     try:
         dim = int(detector.descriptorSize())
@@ -36,6 +42,13 @@ def get_descriptor_dim(method: str) -> int:
 
 
 def extract_local_descriptors(gray: np.ndarray, mask: np.ndarray, method: str, max_desc_per_image: int = 300):
+    """Trích descriptor cục bộ (SIFT/ORB...) tại các keypoint trong vùng vật.
+
+    Phát hiện keypoint trong mask, giữ tối đa `max_desc_per_image` điểm mạnh nhất
+    rồi tính descriptor. Trả về (mảng descriptor N×D, dict thông tin keypoint).
+    Đây là BƯỚC 1 của BoVW; bước 2 là gom cụm thành từ điển, bước 3 là mã hóa
+    histogram (xem fit_bovw_vocabulary / descriptors_to_bovw).
+    """
     detector = _get_detector(method)
     descriptor_dim = get_descriptor_dim(method)
     keypoints = detector.detect(gray, mask=mask)
@@ -50,6 +63,12 @@ def extract_local_descriptors(gray: np.ndarray, mask: np.ndarray, method: str, m
 
 
 def fit_bovw_vocabulary(descriptor_list: list[np.ndarray], vocab_size: int, random_state: int = 42, descriptor_dim: int = 32):
+    """Xây "từ điển thị giác" BoVW: gom tất cả descriptor toàn dataset bằng KMeans.
+
+    Mỗi tâm cụm là 1 "visual word". Trả về ma trận (vocab_size × descriptor_dim).
+    Dùng MiniBatchKMeans cho nhanh, seed cố định để tái lập. Đây là BƯỚC 2 của
+    BoVW, chạy 1 lần ở offline; vocab được lưu để online mã hóa query cùng chuẩn.
+    """
     valid = [d for d in descriptor_list if d is not None and len(d) > 0]
     if not valid:
         return np.zeros((vocab_size, descriptor_dim), dtype=np.float32)
@@ -64,6 +83,12 @@ def fit_bovw_vocabulary(descriptor_list: list[np.ndarray], vocab_size: int, rand
 
 
 def descriptors_to_bovw(descriptors: np.ndarray, vocab: np.ndarray) -> np.ndarray:
+    """Mã hóa descriptor của 1 ảnh thành histogram BoVW theo từ điển vocab.
+
+    Mỗi descriptor được gán cho visual word gần nhất; đếm số lần mỗi word xuất
+    hiện -> histogram (dim = vocab_size), L1-normalize. BƯỚC 3 của BoVW — biến số
+    descriptor thay đổi/ảnh thành vector cố định chiều. Lệch chiều thì trả rỗng.
+    """
     if vocab is None or len(vocab) == 0:
         return np.zeros(0, dtype=np.float32)
     if descriptors is None or len(descriptors) == 0:
@@ -80,6 +105,7 @@ def descriptors_to_bovw(descriptors: np.ndarray, vocab: np.ndarray) -> np.ndarra
 
 
 def bovw_feature_result(hist: np.ndarray, method: str, keypoint_count: int) -> FeatureResult:
+    """Đóng gói histogram BoVW thành FeatureResult chuẩn (kèm plot + số keypoint)."""
     return FeatureResult(
         hist.astype(np.float32),
         {'images': {}, 'plots': {f'{method.upper()} BoVW histogram': {'y': hist.tolist()}}, 'tables': {f'{method.upper()} local': {'keypoints': int(keypoint_count)}}},

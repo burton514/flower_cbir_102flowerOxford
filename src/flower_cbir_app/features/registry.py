@@ -37,6 +37,13 @@ from flower_cbir_app.features.texture_features import extract_glcm, extract_hog,
 
 
 def get_feature_catalog() -> List[FeatureSpec]:
+    """Danh mục TĨNH toàn bộ feature của hệ thống (mỗi feature 1 FeatureSpec).
+
+    Đây là "nguồn sự thật" khai báo có những feature nào, thuộc nhóm gì, distance
+    mặc định, có bật sẵn không, có phải histogram/meta không... UI vẽ checkbox và
+    pipeline chọn cách xử lý đều dựa vào danh sách này. Thêm feature mới = thêm
+    1 dòng ở đây + 1 entry trong EXTRACTORS.
+    """
     return [
         # ── COLOR ───────────────────────────────────────────────────────────────
         FeatureSpec('hsv_hist',     'HSV Histogram',           'color',   'Histogram màu HSV 16x6x3 = 288 bins.',       'chi_square', True,  '288', is_histogram=True, supports_chi_square=True, default_weight=1.0),
@@ -79,6 +86,10 @@ def get_feature_catalog() -> List[FeatureSpec]:
     ]
 
 
+# Bảng tra: feature_key -> hàm extract tương ứng (nhận dict `processed` từ
+# preprocess_image, lấy image_rgb/mask/gray cần thiết). Pipeline gọi
+# EXTRACTORS[key](processed) là chạy đúng feature đó. KHÔNG chứa feature local
+# (BoVW) vì chúng đi qua pipeline riêng (xem LOCAL_FEATURE_MAP).
 EXTRACTORS: Dict[str, Callable] = {
     'hsv_hist': lambda d: extract_hsv_hist(d['image_rgb'], d['mask']),
     'rgb_hist': lambda d: extract_rgb_hist(d['image_rgb'], d['mask']),
@@ -108,6 +119,8 @@ EXTRACTORS: Dict[str, Callable] = {
 }
 
 
+# Feature local đi qua pipeline BoVW riêng (descriptor -> KMeans vocab ->
+# histogram), nên map từ feature_key -> tên detector thay vì hàm extract.
 LOCAL_FEATURE_MAP = {
     'sift_bovw': 'sift',
     'orb_bovw': 'orb',
@@ -117,6 +130,12 @@ LOCAL_FEATURE_MAP = {
 
 
 def get_default_feature_state() -> dict:
+    """Tạo trạng thái feature mặc định ban đầu cho UI (từ catalog).
+
+    Trả về dict {feature_key: {enabled, distance, weight, is_meta, group}} dựa
+    trên giá trị mặc định trong mỗi FeatureSpec. Đây là dữ liệu cho
+    st.session_state.feature_state khi mở app lần đầu.
+    """
     state = {}
     for spec in get_feature_catalog():
         state[spec.key] = {

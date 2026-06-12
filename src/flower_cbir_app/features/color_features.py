@@ -9,6 +9,10 @@ from flower_cbir_app.utils.common import normalize_vector
 
 
 def _masked_pixels(image_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Lấy các pixel thuộc vùng vật (mask>0) dưới dạng mảng (N,3).
+
+    Nếu mask rỗng thì fallback dùng toàn bộ pixel ảnh để không vỡ pipeline.
+    """
     pixels = image_rgb[mask > 0]
     if len(pixels) == 0:
         return image_rgb.reshape(-1, 3)
@@ -16,6 +20,11 @@ def _masked_pixels(image_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 def extract_hsv_hist(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """Histogram màu 3D trong không gian HSV (16 Hue x 6 Sat x 3 Val = 288 chiều).
+
+    Chỉ tính trên vùng vật, L1-normalize. HSV tách màu (Hue) khỏi độ sáng nên
+    bền với thay đổi ánh sáng hơn RGB. Là feature màu chủ lực.
+    """
     hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
     hist = cv2.calcHist([hsv], [0, 1, 2], (mask > 0).astype('uint8'), [16, 6, 3], [0, 180, 0, 256, 0, 256]).flatten()
     hist = normalize_vector(hist)
@@ -23,12 +32,21 @@ def extract_hsv_hist(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
 
 
 def extract_rgb_hist(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """Histogram màu 3D trong không gian RGB (8 x 8 x 8 = 512 chiều).
+
+    Chỉ tính trên vùng vật, L1-normalize. Đơn giản, nhạy với ánh sáng hơn HSV.
+    """
     hist = cv2.calcHist([image_rgb], [0, 1, 2], (mask > 0).astype('uint8'), [8, 8, 8], [0, 256, 0, 256, 0, 256]).flatten()
     hist = normalize_vector(hist)
     return FeatureResult(hist.astype('float32'), {'images': {}, 'plots': {'RGB histogram': {'y': hist.tolist()}}, 'tables': {}}, {})
 
 
 def extract_hue_hist(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """Histogram chỉ kênh Hue (36 chiều) — phân bố tông màu thuần.
+
+    Bỏ qua độ bão hòa và độ sáng nên rất gọn và tập trung vào "màu gì". Hợp khi
+    màu là dấu hiệu phân biệt chính giữa các loài hoa.
+    """
     hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
     hist = cv2.calcHist([hsv], [0], (mask > 0).astype('uint8'), [36], [0, 180]).flatten()
     hist = normalize_vector(hist)
@@ -36,8 +54,12 @@ def extract_hue_hist(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
 
 
 def extract_dominant_colors(image_rgb: np.ndarray, mask: np.ndarray, clusters: int = 5) -> FeatureResult:
-    # Feature này là mô tả palette màu bằng KMeans. Vì so sánh palette bằng
-    # vector nối trực tiếp chỉ là heuristic, feature được để mặc định tắt.
+    """Palette màu chủ đạo bằng KMeans: `clusters` màu kèm tỉ lệ diện tích.
+
+    Vector = nối [R,G,B,ratio] của từng cụm đã sắp theo tỉ lệ giảm dần
+    (dim = clusters x 4). Vì so sánh palette bằng vector nối là heuristic nên
+    feature này mặc định TẮT. Seed cố định để tái lập kết quả.
+    """
     # Đặt seed OpenCV để kết quả tái lập khi chạy lại cùng dữ liệu.
     cv2.setRNGSeed(42)
     pixels = _masked_pixels(image_rgb, mask).astype(np.float32)
@@ -62,8 +84,12 @@ def extract_dominant_colors(image_rgb: np.ndarray, mask: np.ndarray, clusters: i
 
 
 def extract_color_moments(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
-    # Color moments chuẩn: mean, standard deviation, skewness theo từng kênh màu.
-    # Dùng RGB để tránh vấn đề Hue là đại lượng vòng tròn trong HSV.
+    """Color moments: mean + std + skewness theo từng kênh RGB (9 chiều).
+
+    Mô tả màu cực gọn bằng 3 mô-men thống kê/kênh. Dùng RGB thay HSV để tránh
+    Hue là đại lượng vòng (tính trung bình sai). Vector = [means(3), stds(3),
+    skews(3)].
+    """
     rgb = image_rgb.astype(np.float32)
     pixels = rgb[mask > 0]
     if len(pixels) == 0:
@@ -76,6 +102,11 @@ def extract_color_moments(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureRes
 
 
 def extract_lab_moments(image_rgb: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """Mean + std theo từng kênh trong không gian màu LAB (6 chiều).
+
+    LAB tách độ sáng (L) khỏi màu (a,b) và gần với cảm nhận màu của mắt người,
+    nên khoảng cách màu hợp lý hơn RGB. Vector = [means(3), stds(3)].
+    """
     lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     pixels = lab[mask > 0]
     if len(pixels) == 0:

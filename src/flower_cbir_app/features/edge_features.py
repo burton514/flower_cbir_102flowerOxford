@@ -9,6 +9,11 @@ from flower_cbir_app.utils.common import normalize_vector
 
 
 def _gradient(gray: np.ndarray):
+    """Tính gradient ảnh xám bằng Sobel: trả về (gx, gy, magnitude, angle).
+
+    Hướng gradient dùng dạng không dấu [0,180) vì biên ảnh không có chiều cố
+    định (cạnh dốc lên hay xuống đều là cùng một hướng cạnh).
+    """
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(gx * gx + gy * gy)
@@ -18,9 +23,12 @@ def _gradient(gray: np.ndarray):
 
 
 def extract_edge_orientation_hist(gray: np.ndarray, mask: np.ndarray, bins: int = 36) -> FeatureResult:
-    # Edge orientation histogram: chỉ lấy hướng gradient tại các pixel được Canny
-    # phát hiện là biên. Sobel histogram bên dưới lấy toàn bộ gradient foreground,
-    # vì vậy hai feature không còn trùng logic.
+    """Histogram hướng cạnh, chỉ tại các pixel Canny xác định là BIÊN (36 chiều).
+
+    Mỗi bin cộng dồn độ lớn gradient theo hướng, rồi L1-normalize. Khác với
+    sobel_hist (lấy toàn bộ gradient foreground), feature này chỉ xét pixel biên
+    nên mô tả hướng của các đường nét rõ.
+    """
     _, _, mag, ang = _gradient(gray)
     edge = cv2.Canny(gray, 100, 200)
     edge[mask == 0] = 0
@@ -33,6 +41,12 @@ def extract_edge_orientation_hist(gray: np.ndarray, mask: np.ndarray, bins: int 
 
 
 def extract_canny_derived(gray: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """6 thống kê suy ra từ bản đồ cạnh Canny (6 chiều).
+
+    Vector = [tỉ lệ pixel cạnh, số thành phần cạnh, độ dài cạnh trung bình, dài
+    nhất, độ lệch chuẩn độ dài, mật độ cạnh vùng trung tâm]. Mô tả "lượng" và
+    phân bố chi tiết đường nét của vật.
+    """
     edge = cv2.Canny(gray, 100, 200)
     edge[mask == 0] = 0
     lbl = label(edge > 0)
@@ -53,6 +67,11 @@ def extract_canny_derived(gray: np.ndarray, mask: np.ndarray) -> FeatureResult:
 
 
 def extract_sobel_hist(gray: np.ndarray, mask: np.ndarray, bins: int = 36) -> FeatureResult:
+    """Histogram hướng gradient trên TOÀN BỘ vùng vật (36 chiều).
+
+    Cộng dồn độ lớn gradient Sobel theo hướng tại mọi pixel foreground (không chỉ
+    pixel biên), L1-normalize. Phản ánh xu hướng kết cấu/đường nét tổng thể.
+    """
     _, _, mag, ang = _gradient(gray)
     valid = mask > 0
     hist, _ = np.histogram(ang[valid], bins=bins, range=(0, 180), weights=mag[valid])

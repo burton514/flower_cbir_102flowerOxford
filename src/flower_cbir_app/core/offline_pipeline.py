@@ -16,6 +16,11 @@ from flower_cbir_app.utils.common import ensure_dir, parse_label_from_path
 
 
 def _list_images(dataset_root: str, exts: list[str]):
+    """Liệt kê tất cả file ảnh trong dataset (đệ quy mọi thư mục con).
+
+    Quét `dataset_root` bằng rglob, chỉ giữ file có đuôi nằm trong `exts`
+    (so khớp không phân biệt hoa/thường), trả về list path đã sort theo tên.
+    """
     dataset_root = Path(dataset_root)
     allowed = {str(ext).lower() for ext in exts}
     return sorted([p for p in dataset_root.rglob('*') if p.is_file() and p.suffix.lower() in allowed])
@@ -23,6 +28,12 @@ def _list_images(dataset_root: str, exts: list[str]):
 
 
 def _safe_output_stem(relative_name: str) -> str:
+    """Sinh tên file an toàn (không dấu lạ) để lưu ảnh đã xử lý ra đĩa.
+
+    Bỏ phần đuôi, nối các phần đường dẫn bằng '__', thay ký tự đặc biệt bằng '_',
+    rồi gắn 8 ký tự md5 của đường dẫn gốc để tránh trùng tên giữa các thư mục.
+    Ví dụ: 'rose/img_001.jpg' -> 'rose__img_001_a1b2c3d4'.
+    """
     rel = Path(relative_name)
     no_suffix = rel.with_suffix('')
     raw = '__'.join(no_suffix.parts)
@@ -31,6 +42,13 @@ def _safe_output_stem(relative_name: str) -> str:
     return f'{safe}_{short_hash}'
 
 def _save_preprocessed_outputs(workspace_root: str, relative_name: str, processed: dict):
+    """Ghi 4 ảnh kết quả tiền xử lý (normalized/mask/gray/edge) ra đĩa.
+
+    Lưu vào workspace/preprocessed/. Ngoài 4 ảnh chính còn ghi thêm các ảnh
+    trung gian (input, bg_removed, crop...) vào thư mục debug/ để soi lỗi
+    mask/rembg/crop khi cần. Trả về tuple 4 đường dẫn (norm, mask, gray, edge)
+    để caller lưu vào DB.
+    """
     pre_dir = ensure_dir(Path(workspace_root) / 'preprocessed')
     stem = _safe_output_stem(relative_name)
 
@@ -124,6 +142,19 @@ def inspect_dataset(system_config: dict, max_read: int | None = None) -> dict:
 
 
 def run_offline_preprocess(system_config: dict, sample_limit: int = 5, progress_callback=None) -> dict:
+    """PHA OFFLINE 1 — Tiền xử lý toàn bộ dataset và lưu kết quả ra đĩa + DB.
+
+    Các bước:
+      1. Liệt kê mọi ảnh trong dataset_root.
+      2. Xóa sạch dữ liệu preprocess + extraction cũ (reset_preprocess_data),
+         tạo preprocess_run mới.
+      3. Mỗi ảnh: preprocess_image() (tách nền, crop, chuẩn hóa 256x256, gray,
+         edge) -> ghi 4 PNG ra workspace -> lưu image + đường dẫn output vào DB.
+      4. Giữ lại `sample_limit` ảnh đầu để hiển thị debug trên UI.
+
+    KHÔNG trích xuất feature ở bước này. Trả về dict gồm preprocess_run_id,
+    số ảnh, message và samples (debug_bundle để render).
+    """
     dataset_root = system_config['dataset_root']
     if not dataset_root:
         raise ValueError('Dataset root đang trống.')
@@ -161,6 +192,24 @@ def run_offline_preprocess(system_config: dict, sample_limit: int = 5, progress_
 
 
 def run_feature_extraction(system_config: dict, feature_state: dict, progress_callback=None) -> dict:
+    """PHA OFFLINE 2 — Trích xuất feature cho toàn bộ ảnh và lưu ma trận vào DB.
+
+    Chỉ xử lý các feature đang `enabled` trong feature_state. Các bước:
+      1. Xóa dữ liệu extraction cũ, tạo extraction_run mới.
+      2. Mỗi ảnh: nạp lại ảnh chuẩn hóa từ đĩa (nếu pha 1 đã chạy) thay vì
+         preprocess lại -> gọi từng EXTRACTORS[key] để lấy vector -> gom vào RAM
+         (all_processed). Feature local (BoVW) chỉ lấy descriptor thô ở bước này.
+      3. Fit từ điển BoVW (KMeans) trên descriptor toàn dataset, rồi mã hóa
+         descriptor mỗi ảnh thành histogram cố định chiều.
+      4. Chuẩn hóa mỗi feature: L1 cho histogram, z-score cho phần còn lại.
+      5. Tính thang đo distance CỐ ĐỊNH (d_min/d_max trên toàn bộ cặp ảnh) để
+         online normalize ổn định -> lưu feature_config (mean/std/vocab/d_min/
+         d_max...).
+      6. Lưu GỘP ma trận N×D mỗi feature thành 1 blob (feature_matrices).
+
+    KHÔNG tính trước khoảng cách giữa các ảnh; chỉ lưu vector đã chuẩn hóa.
+    Distance được tính sau ở pha đánh giá / truy vấn. Trả về dict tóm tắt run.
+    """
     dataset_root = system_config['dataset_root']
     if not dataset_root:
         raise ValueError('Dataset root đang trống.')

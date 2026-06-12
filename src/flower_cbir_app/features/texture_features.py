@@ -9,6 +9,12 @@ from flower_cbir_app.utils.common import normalize_vector
 
 
 def extract_lbp(gray: np.ndarray, mask: np.ndarray, radius: int = 3, points: int = 24) -> FeatureResult:
+    """Local Binary Pattern histogram — mô tả kết cấu bề mặt (26 chiều).
+
+    Mỗi pixel so độ sáng với `points` điểm trên vòng bán kính `radius`, cho ra
+    một mã LBP 'uniform'; histogram các mã = vector (points+2 = 26 chiều), L1-
+    normalize. Bắt được kết cấu mịn/thô, vân cánh hoa. Bất biến với độ sáng đều.
+    """
     gray_norm = gray.copy()
     gray_norm[mask == 0] = 255
     lbp = local_binary_pattern(gray_norm, P=points, R=radius, method='uniform')
@@ -23,6 +29,7 @@ def extract_lbp(gray: np.ndarray, mask: np.ndarray, radius: int = 3, points: int
 
 
 def _bbox_from_mask(mask: np.ndarray):
+    """Hộp bao (x0,y0,x1,y1) quanh vùng vật trong mask; trả toàn ảnh nếu rỗng."""
     ys, xs = np.where(mask > 0)
     if len(xs) == 0 or len(ys) == 0:
         return 0, 0, mask.shape[1], mask.shape[0]
@@ -30,6 +37,13 @@ def _bbox_from_mask(mask: np.ndarray):
 
 
 def _masked_graycomatrix(reduced: np.ndarray, valid_mask: np.ndarray, distances, angles, levels: int = 8) -> np.ndarray:
+    """Tính GLCM (gray-level co-occurrence matrix) CHỈ trên pixel hợp lệ của mask.
+
+    Với mỗi (khoảng cách, góc), đếm số cặp pixel kề nhau theo offset đó mà cả hai
+    đều nằm trong valid_mask, rồi đối xứng hóa và chuẩn hóa thành xác suất. Khác
+    graycomatrix gốc của skimage ở chỗ loại được pixel nền. Trả mảng
+    (levels, levels, n_distances, n_angles).
+    """
     h, w = reduced.shape
     glcm = np.zeros((levels, levels, len(distances), len(angles)), dtype=np.float64)
     for di, d in enumerate(distances):
@@ -56,7 +70,13 @@ def _masked_graycomatrix(reduced: np.ndarray, valid_mask: np.ndarray, distances,
 
 
 def extract_glcm(gray: np.ndarray, mask: np.ndarray) -> FeatureResult:
-    # Tính GLCM chỉ trên ROI foreground; không để nền trắng chi phối thống kê texture.
+    """6 thuộc tính texture Haralick từ GLCM (6 chiều).
+
+    Vector = [contrast, dissimilarity, homogeneity, energy, correlation, ASM],
+    mỗi giá trị lấy trung bình trên 2 khoảng cách x 4 góc. Tính trên ROI
+    foreground (không để nền trắng chi phối), mức xám gộp về 8 cấp. Mô tả độ
+    tương phản/đồng đều của kết cấu.
+    """
     x0, y0, x1, y1 = _bbox_from_mask(mask)
     gray_crop = gray[y0:y1, x0:x1]
     mask_crop = (mask[y0:y1, x0:x1] > 0)
@@ -80,6 +100,13 @@ def extract_glcm(gray: np.ndarray, mask: np.ndarray) -> FeatureResult:
 
 
 def extract_hog(gray: np.ndarray, mask: np.ndarray) -> FeatureResult:
+    """Histogram of Oriented Gradients — phân bố hướng cạnh theo lưới ô (HOG).
+
+    Chia ảnh thành các ô 64x64, mỗi ô lập histogram 9 hướng gradient, chuẩn hóa
+    theo block 2x2 (L2-Hys). Vector nối các block lại (số chiều tùy kích thước
+    ảnh). Mô tả cấu trúc hình dạng/đường nét cục bộ theo vị trí, hợp để phân biệt
+    bố cục cánh hoa.
+    """
     gray_roi = gray.copy()
     gray_roi[mask == 0] = 255
     feat, hog_image = hog(
