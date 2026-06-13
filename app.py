@@ -586,7 +586,7 @@ if active_tab == "SQLite / Xem DB":
 
         # ── Bảng 4: Tất cả bảng dữ liệu trong DB ─────────────────────────────
         st.markdown("#### 4. Tất cả bảng dữ liệu trong DB")
-        st.caption("Xem nội dung thô các bảng (blob nhị phân được chuyển sang mô tả đọc được). Bỏ qua bảng cấu hình và log chạy.")
+        st.caption("Xem nội dung thô các bảng (blob nhị phân được chuyển sang mô tả đọc được).")
 
         order_keys = [f.key for f in catalog]
         # Bỏ qua bảng config/metadata và bảng log chạy (không cần xem trực tiếp).
