@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from flower_cbir_app.core.offline_pipeline import inspect_dataset, run_offline_preprocess, run_feature_extraction
+from flower_cbir_app.core.offline_pipeline import run_offline_preprocess, run_feature_extraction
 from flower_cbir_app.core.online_pipeline import run_query
 from flower_cbir_app.evaluation.class_separation import evaluate_class_separation
 from flower_cbir_app.evaluation.retrieval_metrics import evaluate_dataset_retrieval
@@ -51,8 +51,6 @@ def ensure_session_state():
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = TAB_NAMES[0]
     # Lưu kết quả từng tab để không bị mất khi chuyển tab
-    if "inspect_result" not in st.session_state:
-        st.session_state.inspect_result = None
     if "preprocess_result" not in st.session_state:
         st.session_state.preprocess_result = None
     if "extract_result" not in st.session_state:
@@ -72,31 +70,38 @@ def append_message(msg: str):
 
 ensure_session_state()
 
+# Mode: "dev" = đầy đủ công cụ; "product" = UI rút gọn cho người dùng cuối.
+MODE = str(st.session_state.system_config.get("mode", "dev")).lower()
+IS_PRODUCT = MODE == "product"
+
 with st.sidebar:
     st.header("Cấu hình hệ thống")
     cfg = st.session_state.system_config
     cfg["dataset_root"] = st.text_input("Dataset root", value=cfg.get("dataset_root", ""))
-    cfg["workspace_root"] = st.text_input("Workspace root", value=cfg.get("workspace_root", "./workspace"))
-    cfg["db_path"] = st.text_input("SQLite path", value=cfg.get("db_path", "./workspace/flower_cbir.sqlite"))
-    cfg["label_source"] = st.selectbox(
-        "Cách lấy nhãn lớp",
-        options=["auto", "parent_folder", "filename_prefix"],
-        index=["auto", "parent_folder", "filename_prefix"].index(cfg.get("label_source", "auto")) if cfg.get("label_source", "auto") in ["auto", "parent_folder", "filename_prefix"] else 0,
-        help="auto: ưu tiên tên thư mục con của dataset, nếu không có thì lấy prefix tên file trước dấu _."
-    )
-    cfg["preprocessing"]["use_rembg"] = st.checkbox("Dùng rembg nếu ảnh chưa có alpha", value=cfg["preprocessing"].get("use_rembg", True))
-    cfg["preprocessing"]["target_size"] = st.number_input("Target size", min_value=64, max_value=1024, value=int(cfg["preprocessing"].get("target_size", 256)), step=32)
-    cfg["preprocessing"]["target_object_ratio"] = st.slider("Tỉ lệ chiếm khung của object", min_value=0.4, max_value=0.95, value=float(cfg["preprocessing"].get("target_object_ratio", 0.78)), step=0.01)
-    cfg["local_bovw"]["vocab_size"] = st.number_input("BoVW vocab size", min_value=8, max_value=256, value=int(cfg["local_bovw"].get("vocab_size", 32)), step=8)
-    cfg["fusion"]["auto_weight"] = st.checkbox("Auto weight theo nhóm", value=cfg["fusion"].get("auto_weight", True))
 
-    uploaded_cfg = st.file_uploader("Nạp config JSON", type=["json"])
-    if uploaded_cfg is not None:
-        external_cfg = json.load(uploaded_cfg)
-        deep_update(st.session_state.system_config, external_cfg.get("system", external_cfg))
-        if "features" in external_cfg:
-            st.session_state.feature_state = external_cfg["features"]
-        append_message("Đã nạp config từ file JSON.")
+    if not IS_PRODUCT:
+        # ── DEV: hiển thị đầy đủ cấu hình hệ thống ───────────────────────────
+        cfg["workspace_root"] = st.text_input("Workspace root", value=cfg.get("workspace_root", "./workspace"))
+        cfg["db_path"] = st.text_input("SQLite path", value=cfg.get("db_path", "./workspace/flower_cbir.sqlite"))
+        cfg["label_source"] = st.selectbox(
+            "Cách lấy nhãn lớp",
+            options=["auto", "parent_folder", "filename_prefix"],
+            index=["auto", "parent_folder", "filename_prefix"].index(cfg.get("label_source", "auto")) if cfg.get("label_source", "auto") in ["auto", "parent_folder", "filename_prefix"] else 0,
+            help="auto: ưu tiên tên thư mục con của dataset, nếu không có thì lấy prefix tên file trước dấu _."
+        )
+        cfg["preprocessing"]["use_rembg"] = st.checkbox("Dùng rembg nếu ảnh chưa có alpha", value=cfg["preprocessing"].get("use_rembg", True))
+        cfg["preprocessing"]["target_size"] = st.number_input("Target size", min_value=64, max_value=1024, value=int(cfg["preprocessing"].get("target_size", 256)), step=32)
+        cfg["preprocessing"]["target_object_ratio"] = st.slider("Tỉ lệ chiếm khung của object", min_value=0.4, max_value=0.95, value=float(cfg["preprocessing"].get("target_object_ratio", 0.78)), step=0.01)
+        cfg["local_bovw"]["vocab_size"] = st.number_input("BoVW vocab size", min_value=8, max_value=256, value=int(cfg["local_bovw"].get("vocab_size", 32)), step=8)
+        cfg["fusion"]["auto_weight"] = st.checkbox("Auto weight theo nhóm", value=cfg["fusion"].get("auto_weight", True))
+
+        uploaded_cfg = st.file_uploader("Nạp config JSON", type=["json"])
+        if uploaded_cfg is not None:
+            external_cfg = json.load(uploaded_cfg)
+            deep_update(st.session_state.system_config, external_cfg.get("system", external_cfg))
+            if "features" in external_cfg:
+                st.session_state.feature_state = external_cfg["features"]
+            append_message("Đã nạp config từ file JSON.")
 
     if st.button("Áp dụng cấu hình", use_container_width=True, type="primary"):
         st.session_state.applied_config = {
@@ -108,7 +113,7 @@ with st.sidebar:
         save_json(workspace / "active_config.json", st.session_state.applied_config)
         append_message("Đã áp dụng cấu hình hiện tại. Các nút xử lí phía dưới sẽ dùng đúng cấu hình này.")
 
-    if st.button("Lưu config JSON", use_container_width=True):
+    if not IS_PRODUCT and st.button("Lưu config JSON", use_container_width=True):
         workspace = Path(st.session_state.system_config["workspace_root"])
         workspace.mkdir(parents=True, exist_ok=True)
         out = workspace / "saved_config.json"
@@ -137,144 +142,139 @@ st.divider()
 active_tab = st.session_state.active_tab
 
 if active_tab == "Feature & Weight":
-    st.markdown("### Danh sách feature")
-    show_advanced = st.checkbox(
-        "Hiển thị cả feature không bật tick mặc định",
-        value=True,
-        key="show_advanced_features",
-        help="Tắt để chỉ hiện các feature được tick mặc định cho gọn; bật để xem/chỉnh toàn bộ feature.",
-    )
-    groups = {}
-    for feature in catalog:
-        if not show_advanced and not feature.enabled_by_default:
-            continue
-        groups.setdefault(feature.group, []).append(feature)
+    if IS_PRODUCT:
+        # ── PRODUCT: chỉ hiển thị danh sách feature đang dùng (read-only) ────
+        st.markdown("### Các đặc trưng đang sử dụng")
+        st.caption("Hệ thống dùng bộ đặc trưng mặc định dưới đây (không chỉnh sửa). Mỗi đặc trưng mô tả bông hoa theo một khía cạnh riêng.")
 
-    for group_name, items in groups.items():
-        with st.expander(f"Nhóm: {group_name}", expanded=True):
-            for feature in items:
-                state = st.session_state.feature_state[feature.key]
-                cols = st.columns([2, 1, 1, 1, 2])
-                state["enabled"] = cols[0].checkbox(
-                    f"{feature.name}",
-                    value=state["enabled"],
-                    key=f"enabled_{feature.key}",
-                    help=feature.description,
-                )
-                distance_options = ["cosine", "l2", "chi_square"] if feature.supports_chi_square else ["cosine", "l2"]
-                if state.get("distance") not in distance_options:
-                    state["distance"] = feature.default_distance if feature.default_distance in distance_options else distance_options[0]
-                state["distance"] = cols[1].selectbox(
-                    "Distance",
-                    options=distance_options,
-                    index=distance_options.index(state["distance"]),
-                    key=f"distance_{feature.key}",
-                    label_visibility="collapsed",
-                    help="Chi-square chỉ được phép dùng với histogram không âm phù hợp χ².",
-                )
-                state["weight"] = cols[2].number_input(
-                    "Weight",
-                    min_value=0.0,
-                    value=float(state["weight"]),
-                    step=0.1,
-                    key=f"weight_{feature.key}",
-                    label_visibility="collapsed",
-                )
-                cols[3].write(f"Dim: {feature.output_dim_display}")
-                cols[4].caption(feature.description)
+        enabled_feats = [f for f in catalog if st.session_state.feature_state[f.key]["enabled"]]
+        rows = []
+        for f in enabled_feats:
+            state = st.session_state.feature_state[f.key]
+            rows.append({
+                "Nhóm": f.group,
+                "Đặc trưng": f.name,
+                "Số chiều": f.output_dim_display,
+                "Khoảng cách": state["distance"],
+                "Mô tả": f.description,
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.markdown("### Bảng tổng hợp nhanh")
-    df = make_feature_config_dataframe(catalog, st.session_state.feature_state)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        # ── DEV: chỉnh sửa đầy đủ feature/weight/distance ────────────────────
+        st.markdown("### Danh sách feature")
+        show_advanced = st.checkbox(
+            "Hiển thị cả feature không bật tick mặc định",
+            value=True,
+            key="show_advanced_features",
+            help="Tắt để chỉ hiện các feature được tick mặc định cho gọn; bật để xem/chỉnh toàn bộ feature.",
+        )
+        groups = {}
+        for feature in catalog:
+            if not show_advanced and not feature.enabled_by_default:
+                continue
+            groups.setdefault(feature.group, []).append(feature)
 
-    st.divider()
-
-    # ── Fisher Weight ────────────────────────────────────────────────────────
-    st.markdown("### ⚖️ Tính trọng số theo Fisher Ratio")
-    st.caption(
-        "Fisher ratio = S_B / S_W (phương sai giữa lớp / trong lớp). "
-        "Feature nào tách lớp tốt hơn sẽ được weight cao hơn. "
-        "Cần đã có extraction run trong SQLite."
-    )
-    if st.button("Tính Fisher Weight từ dữ liệu", use_container_width=True):
-        try:
-            from flower_cbir_app.core.fusion import build_fisher_weights
-            import numpy as _np
-            db_fw = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
-            run_id = db_fw.get_latest_extraction_run_id()
-            if run_id is None:
-                st.session_state.fisher_weight_result = {"warning": "Chưa có extraction run. Hãy trích xuất đặc trưng trước."}
-            else:
-                configs_fw = db_fw.get_extraction_feature_configs(run_id)
-                matrices_fw = {k: db_fw.get_feature_matrix(run_id, k) for k in configs_fw}
-                matrices_fw = {k: v for k, v in matrices_fw.items() if not v.empty}
-                base_fw = next(iter(matrices_fw.values())) if matrices_fw else None
-                if base_fw is None:
-                    st.session_state.fisher_weight_result = {"warning": "Không có vector trong DB."}
-                else:
-                    labels_fw = _np.asarray(base_fw['label'].tolist())
-                    fw = build_fisher_weights(
-                        configs_fw, matrices_fw, labels_fw,
-                        exclude_meta_from_retrieval=True,
+        for group_name, items in groups.items():
+            with st.expander(f"Nhóm: {group_name}", expanded=True):
+                for feature in items:
+                    state = st.session_state.feature_state[feature.key]
+                    cols = st.columns([2, 1, 1, 1, 2])
+                    state["enabled"] = cols[0].checkbox(
+                        f"{feature.name}",
+                        value=state["enabled"],
+                        key=f"enabled_{feature.key}",
+                        help=feature.description,
                     )
-                    st.session_state.fisher_weight_result = fw
-                    append_message("Đã tính Fisher weight từ dữ liệu.")
-        except Exception as exc:
-            st.session_state.fisher_weight_result = {"error": str(exc)}
+                    distance_options = ["cosine", "l2", "chi_square"] if feature.supports_chi_square else ["cosine", "l2"]
+                    if state.get("distance") not in distance_options:
+                        state["distance"] = feature.default_distance if feature.default_distance in distance_options else distance_options[0]
+                    state["distance"] = cols[1].selectbox(
+                        "Distance",
+                        options=distance_options,
+                        index=distance_options.index(state["distance"]),
+                        key=f"distance_{feature.key}",
+                        label_visibility="collapsed",
+                        help="Chi-square chỉ được phép dùng với histogram không âm phù hợp χ².",
+                    )
+                    state["weight"] = cols[2].number_input(
+                        "Weight",
+                        min_value=0.0,
+                        value=float(state["weight"]),
+                        step=0.1,
+                        key=f"weight_{feature.key}",
+                        label_visibility="collapsed",
+                    )
+                    cols[3].write(f"Dim: {feature.output_dim_display}")
+                    cols[4].caption(feature.description)
 
-    if st.session_state.fisher_weight_result is not None:
-        r = st.session_state.fisher_weight_result
-        if isinstance(r, dict) and "error" in r:
-            st.exception(Exception(r["error"]))
-        elif isinstance(r, dict) and "warning" in r:
-            st.warning(r["warning"])
-        else:
-            fw_df = pd.DataFrame([
-                {"feature": k, "fisher_weight": round(v, 6)}
-                for k, v in sorted(r.items(), key=lambda x: -x[1])
-            ])
-            st.dataframe(fw_df, use_container_width=True, hide_index=True)
-            if st.button("Áp dụng Fisher Weight vào cấu hình hiện tại", type="primary"):
-                for k, v in r.items():
-                    if k in st.session_state.feature_state:
-                        st.session_state.feature_state[k]["weight"] = float(v)
-                append_message("Đã áp dụng Fisher weight vào feature_state. Nhớ bấm 'Áp dụng cấu hình' để lưu.")
-                st.rerun()
+        st.markdown("### Bảng tổng hợp nhanh")
+        df = make_feature_config_dataframe(catalog, st.session_state.feature_state)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    st.divider()
+        st.divider()
 
-    # ── Từ điển chiều vector ─────────────────────────────────────────────────
+        # ── Fisher Weight ────────────────────────────────────────────────────────
+        st.markdown("### ⚖️ Tính trọng số theo Fisher Ratio")
+        st.caption(
+            "Fisher ratio = S_B / S_W (phương sai giữa lớp / trong lớp). "
+            "Feature nào tách lớp tốt hơn sẽ được weight cao hơn. "
+            "Cần đã có extraction run trong SQLite."
+        )
+        if st.button("Tính Fisher Weight từ dữ liệu", use_container_width=True):
+            try:
+                from flower_cbir_app.core.fusion import build_fisher_weights
+                import numpy as _np
+                db_fw = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
+                run_id = db_fw.get_latest_extraction_run_id()
+                if run_id is None:
+                    st.session_state.fisher_weight_result = {"warning": "Chưa có extraction run. Hãy trích xuất đặc trưng trước."}
+                else:
+                    configs_fw = db_fw.get_extraction_feature_configs(run_id)
+                    matrices_fw = {k: db_fw.get_feature_matrix(run_id, k) for k in configs_fw}
+                    matrices_fw = {k: v for k, v in matrices_fw.items() if not v.empty}
+                    base_fw = next(iter(matrices_fw.values())) if matrices_fw else None
+                    if base_fw is None:
+                        st.session_state.fisher_weight_result = {"warning": "Không có vector trong DB."}
+                    else:
+                        labels_fw = _np.asarray(base_fw['label'].tolist())
+                        fw = build_fisher_weights(
+                            configs_fw, matrices_fw, labels_fw,
+                            exclude_meta_from_retrieval=True,
+                        )
+                        st.session_state.fisher_weight_result = fw
+                        append_message("Đã tính Fisher weight từ dữ liệu.")
+            except Exception as exc:
+                st.session_state.fisher_weight_result = {"error": str(exc)}
+
+        if st.session_state.fisher_weight_result is not None:
+            r = st.session_state.fisher_weight_result
+            if isinstance(r, dict) and "error" in r:
+                st.exception(Exception(r["error"]))
+            elif isinstance(r, dict) and "warning" in r:
+                st.warning(r["warning"])
+            else:
+                fw_df = pd.DataFrame([
+                    {"feature": k, "fisher_weight": round(v, 6)}
+                    for k, v in sorted(r.items(), key=lambda x: -x[1])
+                ])
+                st.dataframe(fw_df, use_container_width=True, hide_index=True)
+                if st.button("Áp dụng Fisher Weight vào cấu hình hiện tại", type="primary"):
+                    for k, v in r.items():
+                        if k in st.session_state.feature_state:
+                            st.session_state.feature_state[k]["weight"] = float(v)
+                    append_message("Đã áp dụng Fisher weight vào feature_state. Nhớ bấm 'Áp dụng cấu hình' để lưu.")
+                    st.rerun()
+
+        st.divider()
+
+    # ── Từ điển chiều vector (hiển thị ở cả 2 mode) ──────────────────────────
     render_feature_glossary(catalog, st.session_state.feature_state)
 
 # ── Tab: Tiền xử lí offline ──────────────────────────────────────────────────
 if active_tab == "Tiền xử lí offline":
     st.markdown("### Pipeline offline")
     st.write("Tạo bộ ảnh chuẩn và lưu kết quả trung gian vào workspace.")
-
-    if st.button("Kiểm tra nhanh dataset", use_container_width=True):
-        try:
-            summary = inspect_dataset(st.session_state.applied_config["system"])
-            st.session_state.inspect_result = summary
-        except Exception as exc:
-            st.session_state.inspect_result = {"error": str(exc)}
-
-    if st.session_state.inspect_result is not None:
-        r = st.session_state.inspect_result
-        if "error" in r:
-            st.error(r["error"])
-        else:
-            st.markdown("#### Thống kê dataset")
-            overview = {k: v for k, v in r.items() if k not in {"label_counts"}}
-            st.json(overview)
-            if r.get("label_counts"):
-                label_df = pd.DataFrame([
-                    {"label": label, "count": count}
-                    for label, count in r["label_counts"].items()
-                ])
-                st.markdown("#### Số ảnh theo nhãn")
-                st.dataframe(label_df, use_container_width=True, hide_index=True)
-
-    st.divider()
 
     sample_limit = st.number_input("Số ảnh hiển thị log/debug gần nhất", min_value=1, max_value=20, value=5, key="sample_limit_input")
 
@@ -353,6 +353,23 @@ if active_tab == "Trích xuất đặc trưng":
 if active_tab == "Đánh giá":
     st.markdown("### Đánh giá")
 
+    # Nạp lại kết quả đánh giá đã lưu trong DB (lần gần nhất) nếu session chưa có.
+    if st.session_state.eval_result is None:
+        try:
+            db_ev = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
+            run_id_ev = db_ev.get_latest_extraction_run_id()
+            if run_id_ev is not None:
+                saved = db_ev.get_evaluation(run_id_ev)
+                if saved is not None:
+                    st.session_state.eval_result = {
+                        "metrics": saved["metrics"],
+                        "separation": saved["separation"],
+                        "loaded_from_db": True,
+                        "created_at": saved.get("created_at"),
+                    }
+        except Exception:
+            pass
+
     if st.button("Đánh giá", type="primary"):
         try:
             db = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
@@ -374,7 +391,9 @@ if active_tab == "Đánh giá":
                 with st.spinner("Đang tính class separation metrics..."):
                     separation = evaluate_class_separation(db, extraction_run_id)
 
-                append_message("Đã tính xong metric truy hồi và độ tách lớp.")
+                # Lưu kết quả vào DB để mở lại còn xem được lần gần nhất.
+                db.save_evaluation(extraction_run_id, metrics, separation)
+                append_message("Đã tính xong metric truy hồi và độ tách lớp, đã lưu vào DB.")
                 st.session_state.eval_result = {
                     "metrics": metrics,
                     "separation": separation,
@@ -389,25 +408,22 @@ if active_tab == "Đánh giá":
         elif "warning" in r:
             st.warning(r["warning"])
         else:
+            if r.get("loaded_from_db"):
+                st.info(f"Đang hiển thị kết quả đánh giá đã lưu trong DB (lúc {r.get('created_at', '?')}). Bấm 'Đánh giá' để chạy lại.")
             metrics = r["metrics"]
-            separation = r["separation"]
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### Retrieval @5 (tổng thể)")
-                overall = {k: v for k, v in metrics.items() if k != "per_label"}
-                st.dataframe(pd.DataFrame([overall]))
-            with col2:
-                st.markdown("#### Class separation")
-                st.dataframe(pd.DataFrame([separation]))
+            st.markdown("#### Retrieval @5 (tổng thể)")
+            overall = {k: v for k, v in metrics.items() if k != "per_label" and "recall" not in k and "skipped" not in k}
+            st.dataframe(pd.DataFrame([overall]), use_container_width=True, hide_index=True)
 
             per_label = metrics.get("per_label", [])
             if per_label:
                 st.markdown("#### Retrieval @5 theo từng nhãn")
                 df_label = pd.DataFrame(per_label)
+                df_label = df_label.drop(columns=[c for c in df_label.columns if "recall" in c or "skipped" in c], errors="ignore")
                 df_label = df_label.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
                 st.dataframe(
                     df_label.style.background_gradient(
-                        subset=["precision_at_5", "recall_at_5", "map_at_5", "mrr_at_5"],
+                        subset=["precision_at_5", "map_at_5", "mrr_at_5"],
                         cmap="RdYlGn",
                     ),
                     use_container_width=True,
@@ -495,15 +511,66 @@ if active_tab == "Truy vấn":
 
 # ── Tab: SQLite / Xem DB ─────────────────────────────────────────────────────
 if active_tab == "SQLite / Xem DB":
-    st.markdown("### SQLite")
+    st.markdown("### Dữ liệu trong cơ sở dữ liệu (lần trích xuất gần nhất)")
     db = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### Run gần nhất")
-        st.write({
-            "latest_preprocess_run_id": db.get_latest_preprocess_run_id(),
-            "latest_extraction_run_id": db.get_latest_extraction_run_id(),
-        })
-    with col2:
-        st.markdown("#### Ảnh gần nhất")
-        st.dataframe(pd.DataFrame(db.list_images(limit=20)), use_container_width=True, hide_index=True)
+    run_id_view = db.get_latest_extraction_run_id()
+
+    if run_id_view is None:
+        st.info("Chưa có dữ liệu trích xuất trong DB. Hãy chạy 'Tiền xử lí offline' rồi 'Trích xuất đặc trưng'.")
+    else:
+        # ── Bảng 1: dữ liệu đặc trưng đã lưu ─────────────────────────────────
+        st.markdown("#### 1. Đặc trưng đã trích xuất & lưu trong DB")
+        st.caption("Mỗi đặc trưng lưu gộp 1 ma trận N×D (N = số ảnh, D = số chiều). Lấy trực tiếp từ bảng feature_matrices.")
+        summary = db.get_feature_matrices_summary(run_id_view)
+        if not summary:
+            st.info("Extraction run chưa có ma trận đặc trưng nào.")
+        else:
+            name_map = {f.key: f.name for f in catalog}
+            group_map = {f.key: f.group for f in catalog}
+            db_rows = [{
+                "Nhóm": group_map.get(s["feature_key"], "?"),
+                "Đặc trưng": name_map.get(s["feature_key"], s["feature_key"]),
+                "Số ảnh (vector)": s["num_rows"],
+                "Số chiều": s["dim"],
+            } for s in summary]
+            st.dataframe(pd.DataFrame(db_rows), use_container_width=True, hide_index=True)
+            total_imgs = summary[0]["num_rows"] if summary else 0
+            st.caption(f"Extraction run #{run_id_view} · {len(summary)} đặc trưng · {total_imgs} ảnh trong kho.")
+
+        st.divider()
+
+        # ── Bảng 2: vector đặc trưng của từng ảnh (ảnh × feature) ────────────
+        st.markdown("#### 2. Vector đặc trưng của từng ảnh")
+        st.caption("Mỗi hàng là 1 ảnh, mỗi cột là 1 đặc trưng, giá trị ô là vector đặc trưng (rút gọn) lấy từ DB.")
+        feat_keys = [s["feature_key"] for s in summary] if summary else []
+        if feat_keys:
+            per_img_df = db.get_features_per_image_table(run_id_view, feat_keys, limit=None)
+            if per_img_df.empty:
+                st.info("Không có dữ liệu vector để hiển thị.")
+            else:
+                # Đổi tên cột feature_key → tên hiển thị cho dễ đọc
+                rename = {f.key: f.name for f in catalog}
+                per_img_df = per_img_df.rename(columns=rename)
+                st.dataframe(per_img_df, use_container_width=True, hide_index=True, height=500)
+                st.caption(f"Hiển thị toàn bộ {len(per_img_df)} ảnh · {len(feat_keys)} đặc trưng. Vector dài được cắt gọn (hiện 8 giá trị đầu).")
+
+        st.divider()
+
+        # ── Bảng 3: kết quả đánh giá gần nhất ────────────────────────────────
+        st.markdown("#### 3. Kết quả đánh giá gần nhất")
+        saved_eval = db.get_evaluation(run_id_view)
+        if saved_eval is None:
+            st.info("Chưa có kết quả đánh giá đã lưu. Sang tab 'Đánh giá' và bấm nút để tạo.")
+        else:
+            st.caption(f"Đã lưu lúc {saved_eval.get('created_at', '?')}.")
+            m = saved_eval["metrics"]
+            st.markdown("**Retrieval @5 (tổng thể)**")
+            overall = {k: v for k, v in m.items() if k != "per_label" and "recall" not in k and "skipped" not in k}
+            st.dataframe(pd.DataFrame([overall]), use_container_width=True, hide_index=True)
+            per_label = m.get("per_label", [])
+            if per_label:
+                st.markdown("**Retrieval @5 theo từng nhãn**")
+                df_lbl = pd.DataFrame(per_label)
+                df_lbl = df_lbl.drop(columns=[c for c in df_lbl.columns if "recall" in c or "skipped" in c], errors="ignore")
+                df_lbl = df_lbl.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
+                st.dataframe(df_lbl, use_container_width=True, hide_index=True)

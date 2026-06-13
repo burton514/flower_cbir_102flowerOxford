@@ -1,5 +1,6 @@
 {
-  "dataset_root": "D:\\hoc hanh\\csdldpt\\btl\\flower_cbir_102flowerOxford\\flowers_final",
+  "mode": "product",
+  "dataset_root": "D:\\hoc hanh\\csdldpt\\btl\\flower_cbir_102flowerOxford\\flowers_final_2",
   "workspace_root": "./workspace",
   "db_path": "./workspace/flower_cbir.sqlite",
   "random_state": 42,
@@ -26,7 +27,7 @@
     "canny_high": 160
   },
   "fusion": {
-    "auto_weight": false,
+    "auto_weight": true,
     "exclude_meta_from_retrieval": true
   },
   "local_bovw": {

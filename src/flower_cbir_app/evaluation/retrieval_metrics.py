@@ -17,13 +17,6 @@ def _precision_at_k(relevance):
     return float(np.mean(relevance)) if len(relevance) else 0.0
 
 
-def _recall_at_k(relevance, total_relevant):
-    """Recall@k = số ảnh đúng trong top-k / tổng số ảnh đúng có trong DB."""
-    if total_relevant <= 0:
-        return 0.0
-    return float(np.sum(relevance) / total_relevant)
-
-
 def _average_precision_at_k(relevance, total_relevant, k=5):
     """Average Precision@k — trung bình precision tại mỗi vị trí có ảnh đúng.
 
@@ -72,7 +65,7 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
     Cách làm: dựng ma trận khoảng cách fused N×N (mỗi feature: distance matrix ->
     normalize min-max -> nhân trọng số -> cộng), đặt đường chéo = vô cực để loại
     chính ảnh query. Với mỗi ảnh: lấy top-5, đối chiếu nhãn để tính
-    Precision/Recall/MAP/MRR @5. Bỏ qua query mà nhãn của nó chỉ có 1 ảnh.
+    Precision/MAP/MRR @5. Bỏ qua query mà nhãn của nó chỉ có 1 ảnh.
 
     Trả về dict gồm 4 metric trung bình toàn cục + bảng per_label + số query
     đã đánh giá/bỏ qua. KHÔNG lưu vào DB (kết quả chỉ về session_state của UI).
@@ -88,9 +81,9 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
     matrices = {k: v for k, v in matrices.items() if not v.empty}
     if not matrices:
         return {
-            'precision_at_5': 0.0, 'recall_at_5': 0.0,
+            'precision_at_5': 0.0,
             'map_at_5': 0.0, 'mrr_at_5': 0.0,
-            'evaluated_queries': 0, 'skipped_queries': 0,
+            'evaluated_queries': 0,
             'per_label': [],
         }
 
@@ -120,12 +113,9 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
     np.fill_diagonal(D_fused, np.inf)  # loại query khỏi kết quả
 
     label_precisions: dict = defaultdict(list)
-    label_recalls:    dict = defaultdict(list)
     label_maps:       dict = defaultdict(list)
     label_mrrs:       dict = defaultdict(list)
-    label_skipped:    dict = defaultdict(int)
     evaluated_queries = 0
-    skipped_queries = 0
 
     file_names = base.get('file_name', None)
 
@@ -137,8 +127,6 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
         label = all_labels[i]
         total_relevant = int(np.sum(all_labels == label)) - 1
         if total_relevant <= 0:
-            skipped_queries += 1
-            label_skipped[label] += 1
             continue
 
         row = D_fused[i]
@@ -147,7 +135,6 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
         relevance  = (top_labels == label).astype(np.float32)
 
         label_precisions[label].append(_precision_at_k(relevance))
-        label_recalls[label].append(_recall_at_k(relevance, total_relevant))
         label_maps[label].append(_average_precision_at_k(relevance, total_relevant, k=5))
         label_mrrs[label].append(_mrr_at_k(relevance))
         evaluated_queries += 1
@@ -157,37 +144,31 @@ def evaluate_dataset_retrieval(db, extraction_run_id: int, progress_callback=Non
 
     all_unique_labels = sorted(set(all_labels.tolist()))
     per_label = []
-    all_p, all_r, all_m, all_mrr_list = [], [], [], []
+    all_p, all_m, all_mrr_list = [], [], []
     for lbl in all_unique_labels:
         values = label_precisions.get(lbl, [])
         cnt = len(values)
         if cnt > 0:
             p  = float(np.mean(label_precisions[lbl]))
-            r  = float(np.mean(label_recalls[lbl]))
             m  = float(np.mean(label_maps[lbl]))
             mr = float(np.mean(label_mrrs[lbl]))
             all_p.extend(label_precisions[lbl])
-            all_r.extend(label_recalls[lbl])
             all_m.extend(label_maps[lbl])
             all_mrr_list.extend(label_mrrs[lbl])
         else:
-            p = r = m = mr = 0.0
+            p = m = mr = 0.0
         per_label.append({
             'label':          lbl,
             'count':          cnt,
-            'skipped':        int(label_skipped.get(lbl, 0)),
             'precision_at_5': round(p,  4),
-            'recall_at_5':    round(r,  4),
             'map_at_5':       round(m,  4),
             'mrr_at_5':       round(mr, 4),
         })
 
     return {
         'precision_at_5': float(np.mean(all_p)) if all_p else 0.0,
-        'recall_at_5':    float(np.mean(all_r)) if all_r else 0.0,
         'map_at_5':       float(np.mean(all_m)) if all_m else 0.0,
         'mrr_at_5':       float(np.mean(all_mrr_list)) if all_mrr_list else 0.0,
         'evaluated_queries': int(evaluated_queries),
-        'skipped_queries': int(skipped_queries),
         'per_label':      per_label,
     }

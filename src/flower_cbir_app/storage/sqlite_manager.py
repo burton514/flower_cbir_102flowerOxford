@@ -19,7 +19,7 @@ from flower_cbir_app.utils.common import (
     serialize_json,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ── Cache ma trận feature ở mức module ───────────────────────────────────────
 # Ma trận feature là immutable theo từng extraction_run_id (run append-only,
@@ -53,7 +53,7 @@ class SQLiteManager:
     """Lớp truy cập SQLite — toàn bộ thao tác DB của project (SQL viết tay, KHÔNG ORM).
 
     Quản lý 8 bảng: meta, preprocess_runs, extraction_runs, images,
-    preprocess_outputs, feature_configs, feature_matrices, evaluation_runs.
+    preprocess_outputs, feature_configs, feature_matrices, evaluations.
     Mỗi lần Streamlit rerun lại tạo 1 instance mới nên kết nối là ngắn hạn; ma
     trận feature được cache ở mức module (_MATRIX_CACHE) để khỏi đọc blob lại.
     """
@@ -144,18 +144,23 @@ class SQLiteManager:
                     image_ids_blob BLOB
                 );
 
-                CREATE TABLE IF NOT EXISTS evaluation_runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    extraction_run_id INTEGER,
+                CREATE INDEX IF NOT EXISTS idx_fm_run_key ON feature_matrices(extraction_run_id, feature_key);
+                CREATE INDEX IF NOT EXISTS idx_fc_run ON feature_configs(extraction_run_id);
+                CREATE INDEX IF NOT EXISTS idx_po_run ON preprocess_outputs(preprocess_run_id);
+                CREATE INDEX IF NOT EXISTS idx_po_image ON preprocess_outputs(image_id);
+
+                -- Lưu KẾT QUẢ đánh giá để mở lại xem lần gần nhất đã chạy.
+                -- Chỉ giữ kết quả mới nhất (ghi đè), không lưu lịch sử.
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    extraction_run_id INTEGER PRIMARY KEY,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     metrics_json TEXT,
                     separation_json TEXT
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_fm_run_key ON feature_matrices(extraction_run_id, feature_key);
-                CREATE INDEX IF NOT EXISTS idx_fc_run ON feature_configs(extraction_run_id);
-                CREATE INDEX IF NOT EXISTS idx_po_run ON preprocess_outputs(preprocess_run_id);
-                CREATE INDEX IF NOT EXISTS idx_po_image ON preprocess_outputs(image_id);
+                -- Dọn bảng cũ không còn dùng (migrate từ schema cũ).
+                DROP TABLE IF EXISTS evaluation_runs;
+                DROP TABLE IF EXISTS feature_vectors;
                 """
             )
             conn.execute(
@@ -205,7 +210,7 @@ class SQLiteManager:
         Xóa luôn images để tránh tích lũy ảnh từ nhiều dataset_root khác nhau."""
         with self._connect() as conn:
             conn.executescript("""
-                DELETE FROM evaluation_runs;
+                DELETE FROM evaluations;
                 DELETE FROM feature_matrices;
                 DELETE FROM feature_configs;
                 DELETE FROM extraction_runs;
@@ -219,7 +224,7 @@ class SQLiteManager:
         """Xóa toàn bộ dữ liệu extraction (giữ lại preprocess)."""
         with self._connect() as conn:
             conn.executescript("""
-                DELETE FROM evaluation_runs;
+                DELETE FROM evaluations;
                 DELETE FROM feature_matrices;
                 DELETE FROM feature_configs;
                 DELETE FROM extraction_runs;
@@ -404,6 +409,68 @@ class SQLiteManager:
         configs = self.get_extraction_feature_configs(extraction_run_id)
         return {k: self.get_feature_matrix(extraction_run_id, k) for k in configs.keys()}
 
+    def get_feature_matrices_summary(self, extraction_run_id: int) -> List[dict]:
+        """Tóm tắt các feature matrix đã lưu của 1 run: feature_key, num_rows, dim.
+
+        Dùng cho UI product để hiển thị 'dữ liệu đã trích xuất trong DB' mà không
+        phải tải toàn bộ blob ma trận về.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT feature_key, num_rows, dim FROM feature_matrices WHERE extraction_run_id = ? ORDER BY feature_key',
+                (extraction_run_id,),
+            ).fetchall()
+        return [
+            {'feature_key': r['feature_key'], 'num_rows': int(r['num_rows']), 'dim': int(r['dim'])}
+            for r in rows
+        ]
+
+    def get_features_per_image_table(self, extraction_run_id: int, feature_keys: List[str],
+                                     limit: int | None = None, precision: int = 4) -> pd.DataFrame:
+        """Dựng bảng ảnh × feature: mỗi HÀNG là 1 ảnh, mỗi CỘT là 1 feature,
+        giá trị ô = vector feature của ảnh đó (rút gọn dạng chuỗi).
+
+        limit=None lấy toàn bộ ảnh. Vector được làm tròn `precision` chữ số và
+        cắt bớt nếu quá dài để hiển thị gọn trên UI.
+        """
+        # Đọc ma trận của từng feature (image_ids đồng nhất giữa các feature
+        # vì cùng thứ tự lúc extract).
+        feature_data = {}
+        image_ids_ref = None
+        for key in feature_keys:
+            ids, matrix = self.get_feature_matrix_raw(extraction_run_id, key)
+            if len(ids) == 0:
+                continue
+            feature_data[key] = (ids, matrix)
+            if image_ids_ref is None:
+                image_ids_ref = ids
+        if image_ids_ref is None:
+            return pd.DataFrame()
+
+        lookup = self._images_lookup()
+        n = len(image_ids_ref) if limit is None else min(limit, len(image_ids_ref))
+
+        def _fmt(vec) -> str:
+            arr = np.round(np.asarray(vec, dtype=np.float32), precision)
+            vals = arr.tolist()
+            if len(vals) > 8:
+                head = ', '.join(str(v) for v in vals[:8])
+                return f'[{head}, ... (+{len(vals) - 8})]'
+            return '[' + ', '.join(str(v) for v in vals) + ']'
+
+        rows = []
+        for i in range(n):
+            image_id = int(image_ids_ref[i])
+            meta = lookup.get(image_id, {'file_name': '', 'label': ''})
+            row = {'image_id': image_id, 'file_name': meta['file_name'], 'label': meta['label']}
+            for key in feature_keys:
+                if key not in feature_data:
+                    continue
+                ids, matrix = feature_data[key]
+                row[key] = _fmt(matrix[i]) if i < len(matrix) else ''
+            rows.append(row)
+        return pd.DataFrame(rows)
+
     # ── Latest run ids ────────────────────────────────────────────────────────
     def get_latest_preprocess_run_id(self) -> Optional[int]:
         """Lấy run_id của lần tiền xử lý mới nhất (None nếu chưa có)."""
@@ -423,14 +490,37 @@ class SQLiteManager:
             rows = conn.execute('SELECT * FROM images ORDER BY image_id DESC LIMIT ?', (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def insert_evaluation_run(self, extraction_run_id: int, metrics: dict, separation: dict):
-        """Lưu kết quả 1 lần đánh giá (metrics + class separation) vào DB.
+    # ── Evaluations (lưu kết quả đánh giá, chỉ giữ bản mới nhất / run) ─────────
+    def save_evaluation(self, extraction_run_id: int, metrics: dict, separation: dict):
+        """Lưu (ghi đè) kết quả đánh giá của 1 extraction run.
 
-        Lưu ý: hiện app.py chưa gọi hàm này — kết quả đánh giá mới chỉ giữ trong
-        session_state. Có thể gọi ở đây nếu muốn lưu lịch sử đánh giá.
+        Dùng UPSERT theo extraction_run_id: mỗi run chỉ giữ kết quả mới nhất,
+        không tích lũy lịch sử. Mở lại app vẫn xem được đánh giá lần gần nhất.
         """
         with self._connect() as conn:
             conn.execute(
-                'INSERT INTO evaluation_runs(extraction_run_id, metrics_json, separation_json) VALUES (?, ?, ?)',
+                '''
+                INSERT INTO evaluations(extraction_run_id, created_at, metrics_json, separation_json)
+                VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+                ON CONFLICT(extraction_run_id) DO UPDATE SET
+                    created_at = CURRENT_TIMESTAMP,
+                    metrics_json = excluded.metrics_json,
+                    separation_json = excluded.separation_json
+                ''',
                 (extraction_run_id, serialize_json(metrics), serialize_json(separation)),
             )
+
+    def get_evaluation(self, extraction_run_id: int) -> Optional[dict]:
+        """Đọc kết quả đánh giá đã lưu của 1 run; None nếu chưa từng đánh giá."""
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT created_at, metrics_json, separation_json FROM evaluations WHERE extraction_run_id = ?',
+                (extraction_run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            'created_at': row['created_at'],
+            'metrics': deserialize_json(row['metrics_json']),
+            'separation': deserialize_json(row['separation_json']),
+        }

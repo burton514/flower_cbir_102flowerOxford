@@ -122,7 +122,6 @@ Canny được dùng để:
 ## 7) Đánh giá
 ### Retrieval metrics
 - Precision@5
-- Recall@5
 - MAP@5
 - MRR@5
 
