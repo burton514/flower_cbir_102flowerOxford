@@ -19,11 +19,14 @@ def render_debug_bundle(bundle: dict):
     """
     images = bundle.get('images', {})
     if images:
-        keys = list(images.keys())
-        cols = st.columns(min(3, len(keys)))
-        for idx, key in enumerate(keys):
-            with cols[idx % len(cols)]:
-                st.image(images[key], caption=key, use_container_width=True)
+        # Ẩn ảnh edge map khỏi UI; edge vẫn được tính ngầm trong preprocess và
+        # các feature biên (canny/sobel) vẫn dùng trong fusion.
+        keys = [k for k in images.keys() if 'edge' not in k]
+        if keys:
+            cols = st.columns(min(3, len(keys)))
+            for idx, key in enumerate(keys):
+                with cols[idx % len(cols)]:
+                    st.image(images[key], caption=key, use_container_width=True)
     plots = bundle.get('plots', {})
     for name, payload in plots.items():
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -33,6 +36,8 @@ def render_debug_bundle(bundle: dict):
         st.pyplot(fig)
     tables = bundle.get('tables', {})
     for name, payload in tables.items():
+        if name == 'preprocess_stats':
+            continue  # Ẩn bảng preprocess_stats khỏi UI.
         st.markdown(f"**{name}**")
         st.dataframe(pd.DataFrame([payload]), use_container_width=True, hide_index=True)
 

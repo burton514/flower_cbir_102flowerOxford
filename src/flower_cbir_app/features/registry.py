@@ -49,7 +49,7 @@ def get_feature_catalog() -> List[FeatureSpec]:
         FeatureSpec('hsv_hist',     'HSV Histogram',           'color',   'Histogram màu HSV 16x6x3 = 288 bins.',       'chi_square', True,  '288', is_histogram=True, supports_chi_square=True, default_weight=1.0),
         FeatureSpec('rgb_hist',     'RGB Histogram',           'color',   'Histogram màu RGB 8x8x8.',                   'chi_square', False, '512', is_histogram=True, supports_chi_square=True),
         FeatureSpec('hue_hist',     'Hue Histogram',           'color',   'Histogram riêng kênh Hue.',                  'chi_square', True, '36',  is_histogram=True, supports_chi_square=True, default_weight=1.0),
-        FeatureSpec('dominant_colors', 'Dominant Colors',      'color',   '5 màu trội + tỉ lệ xuất hiện; feature heuristic.', 'cosine', True, '20', default_weight=1.0),
+        FeatureSpec('dominant_colors', 'Dominant Colors',      'color',   '5 màu trội + tỉ lệ xuất hiện; feature heuristic.', 'cosine', True, '20', default_weight=1.0, hidden_in_ui=True),
         FeatureSpec('color_moments','Color Moments',           'color',   'Mean, std, skew trên từng kênh RGB foreground.', 'l2',   True,  '9', default_weight=1.0, display_only=True),
         FeatureSpec('lab_moments',  'Lab Moments',             'color',   'Mean/std trên Lab foreground.',               'l2',     True, '6', default_weight=1.0),
         # ── COLOR MỚI ────────────────────────────────────────────────────────────
