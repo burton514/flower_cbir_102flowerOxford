@@ -15,7 +15,7 @@ from flower_cbir_app.utils.common import (
     serialize_json,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 def _arr_to_json(arr, decimals: int = 6) -> str:
@@ -66,13 +66,14 @@ def _cache_clear(db_path: str):
 class SQLiteManager:
     """Lớp truy cập SQLite — toàn bộ thao tác DB của project (SQL viết tay, KHÔNG ORM).
 
-    Schema rút gọn còn 4 bảng:
+    Schema rút gọn còn 3 bảng:
       - images: ảnh gốc + nhãn.
-      - preprocess_outputs: đường dẫn ảnh đã tiền xử lý của mỗi ảnh (FK → images).
+      - preprocess_outputs: đường dẫn ảnh đã tiền xử lý của mỗi ảnh (FK → images, 1:1).
       - feature_matrices: GỘP ma trận N×D của mỗi feature + toàn bộ cấu hình/tham
         số chuẩn hóa (mean/std/vocab/d_min/d_max/distance/weight...) trong cùng 1
         dòng/feature. feature_key là khóa chính.
-      - evaluations: kết quả đánh giá mới nhất (1 dòng duy nhất, id=1).
+
+    Kết quả đánh giá KHÔNG lưu DB nữa — chỉ tính & hiển thị tại chỗ trong phiên.
 
     Mỗi lần Streamlit rerun lại tạo 1 instance mới nên kết nối là ngắn hạn; ma
     trận feature được cache ở mức module (_MATRIX_CACHE) để khỏi đọc blob lại.
@@ -92,7 +93,7 @@ class SQLiteManager:
         return conn
 
     def _init_db(self):
-        """Tạo 4 bảng nếu chưa có. Migrate sạch schema cũ (8 bảng) bằng user_version."""
+        """Tạo 3 bảng nếu chưa có. Migrate sạch schema cũ bằng user_version."""
         with self._connect() as conn:
             ver = int(conn.execute('PRAGMA user_version').fetchone()[0])
             if ver < SCHEMA_VERSION:
@@ -122,10 +123,11 @@ class SQLiteManager:
                     label TEXT
                 );
 
-                -- Mỗi ảnh có 1 bộ ảnh tiền xử lý (đường dẫn trên đĩa). FK → images.
+                -- Mỗi ảnh có ĐÚNG 1 bộ ảnh tiền xử lý (quan hệ 1:1). image_id là
+                -- UNIQUE để DB ép buộc: 1 ảnh không thể có 2 dòng output. FK → images.
                 CREATE TABLE IF NOT EXISTS preprocess_outputs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    image_id INTEGER,
+                    image_id INTEGER UNIQUE,
                     normalized_path TEXT,
                     mask_path TEXT,
                     gray_path TEXT,
@@ -156,14 +158,6 @@ class SQLiteManager:
                     dim INTEGER,
                     matrix_json TEXT,
                     image_ids_json TEXT
-                );
-
-                -- Kết quả đánh giá mới nhất (chỉ 1 dòng, ghi đè).
-                CREATE TABLE IF NOT EXISTS evaluations (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    metrics_json TEXT,
-                    separation_json TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_po_image ON preprocess_outputs(image_id);
@@ -201,7 +195,6 @@ class SQLiteManager:
         Xóa luôn images để tránh tích lũy ảnh từ nhiều dataset_root khác nhau."""
         with self._connect() as conn:
             conn.executescript("""
-                DELETE FROM evaluations;
                 DELETE FROM feature_matrices;
                 DELETE FROM preprocess_outputs;
                 DELETE FROM images;
@@ -211,10 +204,7 @@ class SQLiteManager:
     def reset_extraction_data(self):
         """Xóa toàn bộ dữ liệu feature (giữ lại preprocess)."""
         with self._connect() as conn:
-            conn.executescript("""
-                DELETE FROM evaluations;
-                DELETE FROM feature_matrices;
-            """)
+            conn.execute("DELETE FROM feature_matrices")
         _cache_clear(self.db_path)
 
     # ── Images ────────────────────────────────────────────────────────────────
@@ -238,13 +228,20 @@ class SQLiteManager:
     def insert_preprocess_output(self, preprocess_run_id: int, image_id: int, normalized_path: str, mask_path: str, gray_path: str, edge_path: str, debug_json: dict):
         """Lưu ĐƯỜNG DẪN 4 ảnh đã tiền xử lý của 1 ảnh (ảnh nằm trên đĩa, DB chỉ giữ path).
 
-        preprocess_run_id giữ lại trong chữ ký cho tương thích nhưng không dùng.
+        UPSERT theo image_id (quan hệ 1:1): chạy lại tiền xử lý cùng ảnh thì ghi đè,
+        không tạo dòng thứ 2. preprocess_run_id giữ trong chữ ký cho tương thích.
         """
         with self._connect() as conn:
             conn.execute(
                 '''
                 INSERT INTO preprocess_outputs(image_id, normalized_path, mask_path, gray_path, edge_path, debug_json)
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    normalized_path = excluded.normalized_path,
+                    mask_path = excluded.mask_path,
+                    gray_path = excluded.gray_path,
+                    edge_path = excluded.edge_path,
+                    debug_json = excluded.debug_json
                 ''',
                 (image_id, normalized_path, mask_path, gray_path, edge_path, serialize_json(debug_json)),
             )
@@ -492,36 +489,6 @@ class SQLiteManager:
         with self._connect() as conn:
             rows = conn.execute('SELECT * FROM images ORDER BY image_id DESC LIMIT ?', (limit,)).fetchall()
         return [dict(row) for row in rows]
-
-    # ── Evaluations (chỉ giữ bản mới nhất, 1 dòng id=1) ───────────────────────
-    def save_evaluation(self, extraction_run_id: int, metrics: dict, separation: dict):
-        """Lưu (ghi đè) kết quả đánh giá mới nhất. Mở lại app vẫn xem được lần gần nhất."""
-        with self._connect() as conn:
-            conn.execute(
-                '''
-                INSERT INTO evaluations(id, created_at, metrics_json, separation_json)
-                VALUES (1, CURRENT_TIMESTAMP, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    created_at = CURRENT_TIMESTAMP,
-                    metrics_json = excluded.metrics_json,
-                    separation_json = excluded.separation_json
-                ''',
-                (serialize_json(metrics), serialize_json(separation)),
-            )
-
-    def get_evaluation(self, extraction_run_id: int) -> Optional[dict]:
-        """Đọc kết quả đánh giá đã lưu; None nếu chưa từng đánh giá."""
-        with self._connect() as conn:
-            row = conn.execute(
-                'SELECT created_at, metrics_json, separation_json FROM evaluations WHERE id = 1',
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            'created_at': row['created_at'],
-            'metrics': deserialize_json(row['metrics_json']),
-            'separation': deserialize_json(row['separation_json']),
-        }
 
     # ── Dump bảng thô (cho UI xem DB) ─────────────────────────────────────────
     def list_tables(self) -> List[str]:

@@ -352,23 +352,7 @@ if active_tab == "Trích xuất đặc trưng":
 # ── Tab: Đánh giá ────────────────────────────────────────────────────────────
 if active_tab == "Đánh giá":
     st.markdown("### Đánh giá")
-
-    # Nạp lại kết quả đánh giá đã lưu trong DB (lần gần nhất) nếu session chưa có.
-    if st.session_state.eval_result is None:
-        try:
-            db_ev = SQLiteManager(st.session_state.applied_config["system"]["db_path"])
-            run_id_ev = db_ev.get_latest_extraction_run_id()
-            if run_id_ev is not None:
-                saved = db_ev.get_evaluation(run_id_ev)
-                if saved is not None:
-                    st.session_state.eval_result = {
-                        "metrics": saved["metrics"],
-                        "separation": saved["separation"],
-                        "loaded_from_db": True,
-                        "created_at": saved.get("created_at"),
-                    }
-        except Exception:
-            pass
+    st.caption("Kết quả đánh giá chỉ hiển thị tại chỗ (giữ trong phiên làm việc), không lưu vào DB.")
 
     if st.button("Đánh giá", type="primary"):
         try:
@@ -391,9 +375,7 @@ if active_tab == "Đánh giá":
                 with st.spinner("Đang tính class separation metrics..."):
                     separation = evaluate_class_separation(db, extraction_run_id)
 
-                # Lưu kết quả vào DB để mở lại còn xem được lần gần nhất.
-                db.save_evaluation(extraction_run_id, metrics, separation)
-                append_message("Đã tính xong metric truy hồi và độ tách lớp, đã lưu vào DB.")
+                append_message("Đã tính xong metric truy hồi và độ tách lớp.")
                 st.session_state.eval_result = {
                     "metrics": metrics,
                     "separation": separation,
@@ -408,8 +390,6 @@ if active_tab == "Đánh giá":
         elif "warning" in r:
             st.warning(r["warning"])
         else:
-            if r.get("loaded_from_db"):
-                st.info(f"Đang hiển thị kết quả đánh giá đã lưu trong DB (lúc {r.get('created_at', '?')}). Bấm 'Đánh giá' để chạy lại.")
             metrics = r["metrics"]
             st.markdown("#### Retrieval @5 (tổng thể)")
             overall = {k: v for k, v in metrics.items() if k != "per_label" and "recall" not in k and "skipped" not in k}
@@ -563,33 +543,11 @@ if active_tab == "SQLite / Xem DB":
 
         st.divider()
 
-        # ── Bảng 3: kết quả đánh giá gần nhất ────────────────────────────────
-        st.markdown("#### 3. Kết quả đánh giá gần nhất")
-        saved_eval = db.get_evaluation(run_id_view)
-        if saved_eval is None:
-            st.info("Chưa có kết quả đánh giá đã lưu. Sang tab 'Đánh giá' và bấm nút để tạo.")
-        else:
-            st.caption(f"Đã lưu lúc {saved_eval.get('created_at', '?')}.")
-            m = saved_eval["metrics"]
-            st.markdown("**Retrieval @5 (tổng thể)**")
-            overall = {k: v for k, v in m.items() if k != "per_label" and "recall" not in k and "skipped" not in k}
-            st.dataframe(pd.DataFrame([overall]), use_container_width=True, hide_index=True)
-            per_label = m.get("per_label", [])
-            if per_label:
-                st.markdown("**Retrieval @5 theo từng nhãn**")
-                df_lbl = pd.DataFrame(per_label)
-                df_lbl = df_lbl.drop(columns=[c for c in df_lbl.columns if "recall" in c or "skipped" in c], errors="ignore")
-                df_lbl = df_lbl.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
-                st.dataframe(df_lbl, use_container_width=True, hide_index=True)
-
-        st.divider()
-
-        # ── Bảng 4: Tất cả bảng dữ liệu trong DB ─────────────────────────────
-        st.markdown("#### 4. Tất cả bảng dữ liệu trong DB")
-        st.caption("Xem nội dung thô các bảng (blob nhị phân được chuyển sang mô tả đọc được).")
+        # ── Bảng 3: Tất cả bảng dữ liệu trong DB ─────────────────────────────
+        st.markdown("#### 3. Tất cả bảng dữ liệu trong DB")
+        st.caption("Xem nội dung 3 bảng: images, preprocess_outputs, feature_matrices.")
 
         order_keys = [f.key for f in catalog]
-        # Hiển thị đủ cả 4 bảng: images, preprocess_outputs, feature_matrices, evaluations.
         all_tables = db.list_tables()
 
         for tbl in all_tables:
