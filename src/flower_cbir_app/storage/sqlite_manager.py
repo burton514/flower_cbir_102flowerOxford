@@ -520,3 +520,90 @@ class SQLiteManager:
             'metrics': deserialize_json(row['metrics_json']),
             'separation': deserialize_json(row['separation_json']),
         }
+
+    # ── Dump bảng thô (cho UI xem DB) ─────────────────────────────────────────
+    def list_tables(self) -> List[str]:
+        """Liệt kê tên các bảng dữ liệu trong DB (bỏ bảng hệ thống sqlite_*)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+        return [r['name'] for r in rows]
+
+    def dump_table(self, table: str, limit: int = 500) -> pd.DataFrame:
+        """Đọc toàn bộ 1 bảng ra DataFrame, CHUYỂN cột blob/json về dạng đọc được.
+
+        - Cột *_blob (BLOB nhị phân): hiển thị tóm tắt 'numpy[shape] | head: ...'.
+        - Cột *_json: giữ nguyên chuỗi JSON (đã là text đọc được).
+        Chỉ cho phép tên bảng có trong list_tables để tránh injection.
+        """
+        if table not in self.list_tables():
+            return pd.DataFrame()
+        with self._connect() as conn:
+            rows = conn.execute(f'SELECT * FROM "{table}" LIMIT ?', (limit,)).fetchall()
+        if not rows:
+            return pd.DataFrame()
+
+        def _blob_repr(b: bytes) -> str:
+            try:
+                arr = blob_to_np(b)
+                flat = arr.ravel()
+                vals = ', '.join(str(x) for x in np.round(flat, 4).tolist())
+                return f'numpy{list(arr.shape)} [{vals}]'
+            except Exception:
+                return f'<blob {len(b)} bytes>'
+
+        data = []
+        for row in rows:
+            d = {}
+            for k in row.keys():
+                v = row[k]
+                if isinstance(v, (bytes, bytearray)):
+                    d[k] = _blob_repr(bytes(v))
+                else:
+                    d[k] = v
+            data.append(d)
+        return pd.DataFrame(data)
+
+    def dump_feature_matrices_readable(self, hidden_keys=None, order_keys=None, limit_rows: int = 500) -> pd.DataFrame:
+        """Dump bảng feature_matrices nhưng chuyển blob ma trận thành mô tả đọc được,
+        ẩn các feature trong hidden_keys, và sắp theo order_keys (thứ tự registry).
+
+        Cột matrix_blob -> 'numpy[N,D] | head: ...', image_ids_blob -> 'N ids: ...'.
+        """
+        hidden_keys = set(hidden_keys or [])
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT extraction_run_id, feature_key, num_rows, dim, matrix_blob, image_ids_blob FROM feature_matrices LIMIT ?',
+                (limit_rows,),
+            ).fetchall()
+        data = []
+        for r in rows:
+            key = r['feature_key']
+            if key in hidden_keys:
+                continue
+            try:
+                mat = raw_blob_to_matrix(r['matrix_blob'], int(r['num_rows']), int(r['dim']))
+                # Hiển thị dạng mảng của mảng (ma trận 2 chiều N×D), đầy đủ giá trị.
+                mat_repr = str(np.round(mat, 4).tolist())
+            except Exception:
+                mat_repr = '<blob>'
+            try:
+                ids = blob_to_ids(r['image_ids_blob'])
+                ids_repr = f'{len(ids)} ids: {ids.tolist()}'
+            except Exception:
+                ids_repr = '<blob>'
+            data.append({
+                'extraction_run_id': r['extraction_run_id'],
+                'feature_key': key,
+                'num_rows': int(r['num_rows']),
+                'dim': int(r['dim']),
+                'matrix_blob': mat_repr,
+                'image_ids_blob': ids_repr,
+            })
+        df = pd.DataFrame(data)
+        if order_keys and not df.empty:
+            order_map = {k: i for i, k in enumerate(order_keys)}
+            df['_o'] = df['feature_key'].map(lambda k: order_map.get(k, 999))
+            df = df.sort_values('_o').drop(columns='_o').reset_index(drop=True)
+        return df

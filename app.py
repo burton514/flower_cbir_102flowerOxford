@@ -581,3 +581,36 @@ if active_tab == "SQLite / Xem DB":
                 df_lbl = df_lbl.drop(columns=[c for c in df_lbl.columns if "recall" in c or "skipped" in c], errors="ignore")
                 df_lbl = df_lbl.sort_values("precision_at_5", ascending=False).reset_index(drop=True)
                 st.dataframe(df_lbl, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Bảng 4: Tất cả bảng dữ liệu trong DB ─────────────────────────────
+        st.markdown("#### 4. Tất cả bảng dữ liệu trong DB")
+        st.caption("Xem nội dung thô các bảng (blob nhị phân được chuyển sang mô tả đọc được). Bỏ qua bảng cấu hình và log chạy.")
+
+        order_keys = [f.key for f in catalog]
+        # Bỏ qua bảng config/metadata và bảng log chạy (không cần xem trực tiếp).
+        skip_tables = {"feature_configs", "meta", "evaluations", "extraction_runs", "preprocess_runs"}
+        all_tables = [t for t in db.list_tables() if t not in skip_tables]
+
+        for tbl in all_tables:
+            with st.expander(f"Bảng: {tbl}", expanded=False):
+                if tbl == "feature_matrices":
+                    # feature_matrices: ẩn feature chạy ngầm + sắp theo registry,
+                    # hiển thị dạng bảng giống các bảng khác. Cột matrix_blob là
+                    # mảng của mảng (ma trận N×D) đầy đủ.
+                    df_tbl = db.dump_feature_matrices_readable(
+                        hidden_keys=hidden_keys, order_keys=order_keys
+                    )
+                    if df_tbl.empty:
+                        st.info("Bảng rỗng.")
+                    else:
+                        st.dataframe(df_tbl, use_container_width=True, hide_index=True, height=300)
+                        st.caption(f"{len(df_tbl)} dòng.")
+                else:
+                    df_tbl = db.dump_table(tbl)
+                    if df_tbl.empty:
+                        st.info("Bảng rỗng.")
+                    else:
+                        st.dataframe(df_tbl, use_container_width=True, hide_index=True, height=300)
+                        st.caption(f"{len(df_tbl)} dòng.")
