@@ -147,7 +147,7 @@ if active_tab == "Feature & Weight":
         st.markdown("### Các đặc trưng đang sử dụng")
         st.caption("Hệ thống dùng bộ đặc trưng mặc định dưới đây (không chỉnh sửa). Mỗi đặc trưng mô tả bông hoa theo một khía cạnh riêng.")
 
-        enabled_feats = [f for f in catalog if st.session_state.feature_state[f.key]["enabled"]]
+        enabled_feats = [f for f in catalog if st.session_state.feature_state[f.key]["enabled"] and not f.hidden_in_ui]
         rows = []
         for f in enabled_feats:
             state = st.session_state.feature_state[f.key]
@@ -518,15 +518,21 @@ if active_tab == "SQLite / Xem DB":
     if run_id_view is None:
         st.info("Chưa có dữ liệu trích xuất trong DB. Hãy chạy 'Tiền xử lí offline' rồi 'Trích xuất đặc trưng'.")
     else:
+        hidden_keys = {f.key for f in catalog if f.hidden_in_ui}
+        name_map = {f.key: f.name for f in catalog}
+        group_map = {f.key: f.group for f in catalog}
+
         # ── Bảng 1: dữ liệu đặc trưng đã lưu ─────────────────────────────────
         st.markdown("#### 1. Đặc trưng đã trích xuất & lưu trong DB")
         st.caption("Mỗi đặc trưng lưu gộp 1 ma trận N×D (N = số ảnh, D = số chiều). Lấy trực tiếp từ bảng feature_matrices.")
-        summary = db.get_feature_matrices_summary(run_id_view)
+        summary_all = db.get_feature_matrices_summary(run_id_view)
+        # Sắp theo đúng thứ tự khai báo trong registry (không phải alphabet) cho dễ học.
+        order_map = {f.key: i for i, f in enumerate(catalog)}
+        summary_all = sorted(summary_all, key=lambda s: order_map.get(s["feature_key"], 999))
+        summary = [s for s in summary_all if s["feature_key"] not in hidden_keys]  # ẩn feature chạy ngầm
         if not summary:
             st.info("Extraction run chưa có ma trận đặc trưng nào.")
         else:
-            name_map = {f.key: f.name for f in catalog}
-            group_map = {f.key: f.group for f in catalog}
             db_rows = [{
                 "Nhóm": group_map.get(s["feature_key"], "?"),
                 "Đặc trưng": name_map.get(s["feature_key"], s["feature_key"]),
@@ -541,18 +547,19 @@ if active_tab == "SQLite / Xem DB":
 
         # ── Bảng 2: vector đặc trưng của từng ảnh (ảnh × feature) ────────────
         st.markdown("#### 2. Vector đặc trưng của từng ảnh")
-        st.caption("Mỗi hàng là 1 ảnh, mỗi cột là 1 đặc trưng, giá trị ô là vector đặc trưng (rút gọn) lấy từ DB.")
+        st.caption("Mỗi hàng là 1 ảnh, mỗi cột là 1 đặc trưng (kèm số chiều), giá trị ô là vector đặc trưng (rút gọn) lấy từ DB.")
         feat_keys = [s["feature_key"] for s in summary] if summary else []
         if feat_keys:
             per_img_df = db.get_features_per_image_table(run_id_view, feat_keys, limit=None)
             if per_img_df.empty:
                 st.info("Không có dữ liệu vector để hiển thị.")
             else:
-                # Đổi tên cột feature_key → tên hiển thị cho dễ đọc
-                rename = {f.key: f.name for f in catalog}
+                # Đổi tên cột feature_key → "Tên feature (D chiều)"
+                dim_map = {s["feature_key"]: s["dim"] for s in summary}
+                rename = {s["feature_key"]: f'{name_map.get(s["feature_key"], s["feature_key"])} ({s["dim"]} chiều)' for s in summary}
                 per_img_df = per_img_df.rename(columns=rename)
                 st.dataframe(per_img_df, use_container_width=True, hide_index=True, height=500)
-                st.caption(f"Hiển thị toàn bộ {len(per_img_df)} ảnh · {len(feat_keys)} đặc trưng. Vector dài được cắt gọn (hiện 8 giá trị đầu).")
+                st.caption(f"Hiển thị toàn bộ {len(per_img_df)} ảnh · {len(feat_keys)} đặc trưng. Mỗi ô là vector đầy đủ của đặc trưng.")
 
         st.divider()
 

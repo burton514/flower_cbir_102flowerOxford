@@ -38,3 +38,5 @@ class FeatureSpec:
     is_histogram: bool = False  # True → dùng L1-normalize thay vì z-score khi lưu vector
     supports_chi_square: bool = False  # True khi vector là histogram không âm phù hợp χ²
     default_weight: float = 1.0  # Trọng số mặc định khi auto_weight=False
+    hidden_in_ui: bool = False  # True → vẫn chạy ngầm (extract/fusion/eval) nhưng ẩn khỏi UI
+    display_only: bool = False  # True → vẫn extract/lưu DB/hiện UI nhưng KHÔNG vào fusion/retrieval/eval

@@ -362,13 +362,15 @@ def run_feature_extraction(system_config: dict, feature_state: dict, progress_ca
             enabled=True,
             distance_type=distance_type,
             weight=float(feature_state[key]['weight']),
-            is_meta=spec.is_meta,
+            # display_only: vẫn extract + lưu DB + hiện UI, nhưng đánh dấu is_meta
+            # để build_effective_weights tự loại khỏi fusion/retrieval/đánh giá.
+            is_meta=bool(spec.is_meta or spec.display_only),
             mean=mean,
             std=std,
             vocab=vocabularies.get(key),
             d_min=d_min,
             d_max=d_max,
-            extra={'output_dim': int(vectors.shape[1]), 'is_histogram': spec.is_histogram, 'supports_chi_square': spec.supports_chi_square},
+            extra={'output_dim': int(vectors.shape[1]), 'is_histogram': spec.is_histogram, 'supports_chi_square': spec.supports_chi_square, 'display_only': bool(spec.display_only)},
         )
         feature_configs_saved[key] = {
             'dim': int(vectors.shape[1]),

@@ -452,11 +452,7 @@ class SQLiteManager:
 
         def _fmt(vec) -> str:
             arr = np.round(np.asarray(vec, dtype=np.float32), precision)
-            vals = arr.tolist()
-            if len(vals) > 8:
-                head = ', '.join(str(v) for v in vals[:8])
-                return f'[{head}, ... (+{len(vals) - 8})]'
-            return '[' + ', '.join(str(v) for v in vals) + ']'
+            return '[' + ', '.join(str(v) for v in arr.tolist()) + ']'
 
         rows = []
         for i in range(n):

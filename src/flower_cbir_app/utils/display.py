@@ -192,7 +192,7 @@ def render_feature_glossary(catalog: list, feature_state: dict):
         "Dùng để giải thích 'vector biểu diễn cho gì' khi báo cáo."
     )
 
-    enabled_keys = [f.key for f in catalog if feature_state.get(f.key, {}).get('enabled', False)]
+    enabled_keys = [f.key for f in catalog if feature_state.get(f.key, {}).get('enabled', False) and not getattr(f, 'hidden_in_ui', False)]
     if not enabled_keys:
         st.info("Chưa có feature nào được bật.")
         return
