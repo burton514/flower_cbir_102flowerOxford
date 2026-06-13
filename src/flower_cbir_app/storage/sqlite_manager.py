@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -9,23 +10,36 @@ import numpy as np
 import pandas as pd
 
 from flower_cbir_app.utils.common import (
-    array_to_raw_blob,
-    blob_to_ids,
     blob_to_np,
     deserialize_json,
-    ids_to_blob,
-    np_to_blob,
-    raw_blob_to_matrix,
     serialize_json,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+
+
+def _arr_to_json(arr, decimals: int = 6) -> str:
+    """Tuần tự hóa numpy array thành chuỗi JSON đọc được (list/list-of-list).
+
+    Làm tròn `decimals` chữ số để xem gọn và không lộ sai số float32 khi mở DB.
+    """
+    a = np.round(np.asarray(arr, dtype=np.float64), decimals)
+    return json.dumps(a.tolist())
+
+
+def _json_to_arr(text: str, dtype=np.float32) -> np.ndarray:
+    """Giải mã chuỗi JSON về numpy array với dtype mong muốn."""
+    return np.asarray(json.loads(text), dtype=dtype)
+
+# Dữ liệu được reset mỗi lần chạy lại (chỉ giữ 1 bộ tại một thời điểm), nên không
+# còn bảng *_runs. Ta dùng một run_id cố định cho cache + cho các API cũ vẫn
+# nhận tham số run_id (giữ tương thích chữ ký hàm cho app.py/pipeline).
+_RUN_ID = 1
 
 # ── Cache ma trận feature ở mức module ───────────────────────────────────────
-# Ma trận feature là immutable theo từng extraction_run_id (run append-only,
-# reset sẽ tạo run_id mới). Vì Streamlit tạo SQLiteManager mới ở mỗi rerun, ta
-# cache ở mức module theo (db_path, run_id, feature_key) để query online không
-# phải đọc lại DB và giải nén blob mỗi lần.
+# Ma trận feature là immutable cho tới khi reset/trích xuất lại. Vì Streamlit tạo
+# SQLiteManager mới ở mỗi rerun, ta cache ở mức module theo (db_path, run_id,
+# feature_key) để query online không phải đọc lại DB và giải nén blob mỗi lần.
 _MATRIX_CACHE: Dict[Tuple[str, int, str], Tuple[np.ndarray, np.ndarray]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -52,8 +66,14 @@ def _cache_clear(db_path: str):
 class SQLiteManager:
     """Lớp truy cập SQLite — toàn bộ thao tác DB của project (SQL viết tay, KHÔNG ORM).
 
-    Quản lý 8 bảng: meta, preprocess_runs, extraction_runs, images,
-    preprocess_outputs, feature_configs, feature_matrices, evaluations.
+    Schema rút gọn còn 4 bảng:
+      - images: ảnh gốc + nhãn.
+      - preprocess_outputs: đường dẫn ảnh đã tiền xử lý của mỗi ảnh (FK → images).
+      - feature_matrices: GỘP ma trận N×D của mỗi feature + toàn bộ cấu hình/tham
+        số chuẩn hóa (mean/std/vocab/d_min/d_max/distance/weight...) trong cùng 1
+        dòng/feature. feature_key là khóa chính.
+      - evaluations: kết quả đánh giá mới nhất (1 dòng duy nhất, id=1).
+
     Mỗi lần Streamlit rerun lại tạo 1 instance mới nên kết nối là ngắn hạn; ma
     trận feature được cache ở mức module (_MATRIX_CACHE) để khỏi đọc blob lại.
     """
@@ -72,29 +92,29 @@ class SQLiteManager:
         return conn
 
     def _init_db(self):
-        """Tạo toàn bộ bảng + index nếu chưa tồn tại và ghi schema_version vào meta."""
+        """Tạo 4 bảng nếu chưa có. Migrate sạch schema cũ (8 bảng) bằng user_version."""
         with self._connect() as conn:
+            ver = int(conn.execute('PRAGMA user_version').fetchone()[0])
+            if ver < SCHEMA_VERSION:
+                # Bỏ các bảng cũ không còn dùng / đã đổi cấu trúc. Dữ liệu cũ sẽ
+                # được sinh lại khi chạy lại tiền xử lý + trích xuất.
+                conn.executescript(
+                    """
+                    DROP TABLE IF EXISTS meta;
+                    DROP TABLE IF EXISTS preprocess_runs;
+                    DROP TABLE IF EXISTS extraction_runs;
+                    DROP TABLE IF EXISTS feature_configs;
+                    DROP TABLE IF EXISTS feature_matrices;
+                    DROP TABLE IF EXISTS preprocess_outputs;
+                    DROP TABLE IF EXISTS evaluations;
+                    DROP TABLE IF EXISTS evaluation_runs;
+                    DROP TABLE IF EXISTS feature_vectors;
+                    """
+                )
+                conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS preprocess_runs (
-                    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    config_json TEXT,
-                    summary_json TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS extraction_runs (
-                    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    config_json TEXT,
-                    summary_json TEXT
-                );
-
                 CREATE TABLE IF NOT EXISTS images (
                     image_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     file_path TEXT UNIQUE,
@@ -102,9 +122,9 @@ class SQLiteManager:
                     label TEXT
                 );
 
+                -- Mỗi ảnh có 1 bộ ảnh tiền xử lý (đường dẫn trên đĩa). FK → images.
                 CREATE TABLE IF NOT EXISTS preprocess_outputs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    preprocess_run_id INTEGER,
                     image_id INTEGER,
                     normalized_path TEXT,
                     mask_path TEXT,
@@ -114,10 +134,13 @@ class SQLiteManager:
                     FOREIGN KEY(image_id) REFERENCES images(image_id)
                 );
 
-                CREATE TABLE IF NOT EXISTS feature_configs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    extraction_run_id INTEGER,
-                    feature_key TEXT,
+                -- GỘP ma trận N×D của mỗi feature + toàn bộ cấu hình/tham số chuẩn
+                -- hóa trong cùng 1 dòng. feature_key là khóa chính (mỗi feature 1
+                -- dòng). Các cột *_json lưu dạng TEXT (JSON) để mở bằng trình xem
+                -- SQLite là thấy số trực tiếp. image_ids_json nối các hàng của ma
+                -- trận với images.image_id.
+                CREATE TABLE IF NOT EXISTS feature_matrices (
+                    feature_key TEXT PRIMARY KEY,
                     group_name TEXT,
                     enabled INTEGER,
                     distance_type TEXT,
@@ -125,109 +148,72 @@ class SQLiteManager:
                     is_meta INTEGER,
                     d_min REAL,
                     d_max REAL,
-                    mean_blob BLOB,
-                    std_blob BLOB,
-                    vocab_blob BLOB,
-                    extra_json TEXT
-                );
-
-                -- Lưu GỘP toàn bộ vector của một feature trong một extraction run
-                -- thành MỘT ma trận (N×D) duy nhất + mảng image_id tương ứng.
-                -- Thay cho thiết kế cũ 1 dòng/ảnh/feature (hàng nghìn dòng rời rạc).
-                CREATE TABLE IF NOT EXISTS feature_matrices (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    extraction_run_id INTEGER,
-                    feature_key TEXT,
+                    mean_json TEXT,
+                    std_json TEXT,
+                    vocab_json TEXT,
+                    extra_json TEXT,
                     num_rows INTEGER,
                     dim INTEGER,
-                    matrix_blob BLOB,
-                    image_ids_blob BLOB
+                    matrix_json TEXT,
+                    image_ids_json TEXT
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_fm_run_key ON feature_matrices(extraction_run_id, feature_key);
-                CREATE INDEX IF NOT EXISTS idx_fc_run ON feature_configs(extraction_run_id);
-                CREATE INDEX IF NOT EXISTS idx_po_run ON preprocess_outputs(preprocess_run_id);
-                CREATE INDEX IF NOT EXISTS idx_po_image ON preprocess_outputs(image_id);
-
-                -- Lưu KẾT QUẢ đánh giá để mở lại xem lần gần nhất đã chạy.
-                -- Chỉ giữ kết quả mới nhất (ghi đè), không lưu lịch sử.
+                -- Kết quả đánh giá mới nhất (chỉ 1 dòng, ghi đè).
                 CREATE TABLE IF NOT EXISTS evaluations (
-                    extraction_run_id INTEGER PRIMARY KEY,
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     metrics_json TEXT,
                     separation_json TEXT
                 );
 
-                -- Dọn bảng cũ không còn dùng (migrate từ schema cũ).
-                DROP TABLE IF EXISTS evaluation_runs;
-                DROP TABLE IF EXISTS feature_vectors;
+                CREATE INDEX IF NOT EXISTS idx_po_image ON preprocess_outputs(image_id);
                 """
-            )
-            conn.execute(
-                'INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-                ('schema_version', str(SCHEMA_VERSION)),
             )
 
     # ── Schema version ────────────────────────────────────────────────────────
     def get_schema_version(self) -> int:
-        """Đọc số phiên bản schema đang lưu trong bảng meta (0 nếu chưa có)."""
+        """Đọc số phiên bản schema (PRAGMA user_version)."""
         with self._connect() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-        return int(row['value']) if row else 0
+            return int(conn.execute('PRAGMA user_version').fetchone()[0])
 
-    # ── Runs ────────────────────────────────────────────────────────────────
+    # ── Runs (giữ API cũ, không còn bảng *_runs) ──────────────────────────────
     def create_preprocess_run(self, config: dict, summary: dict | None = None) -> int:
-        """Tạo 1 bản ghi preprocess_run mới (lưu config), trả về run_id vừa sinh."""
-        with self._connect() as conn:
-            cur = conn.execute(
-                'INSERT INTO preprocess_runs(config_json, summary_json) VALUES (?, ?)',
-                (serialize_json(config), serialize_json(summary or {})),
-            )
-            return int(cur.lastrowid)
+        """Tương thích API cũ: không còn bảng runs, trả về run_id cố định."""
+        return _RUN_ID
 
     def create_extraction_run(self, config: dict, summary: dict | None = None) -> int:
-        """Tạo 1 bản ghi extraction_run mới (lưu config), trả về run_id vừa sinh."""
-        with self._connect() as conn:
-            cur = conn.execute(
-                'INSERT INTO extraction_runs(config_json, summary_json) VALUES (?, ?)',
-                (serialize_json(config), serialize_json(summary or {})),
-            )
-            return int(cur.lastrowid)
+        """Tương thích API cũ: không còn bảng runs, trả về run_id cố định."""
+        return _RUN_ID
 
     def update_extraction_run_summary(self, run_id: int, summary: dict):
-        """Cập nhật phần summary_json (số ảnh, feature...) cho 1 extraction run."""
-        with self._connect() as conn:
-            conn.execute('UPDATE extraction_runs SET summary_json = ? WHERE run_id = ?', (serialize_json(summary), run_id))
+        """Tương thích API cũ: không lưu summary run (đã bỏ bảng extraction_runs)."""
+        return None
 
     def get_extraction_run_config(self, run_id: int) -> dict:
-        """Đọc lại config (system + features) đã lưu của 1 extraction run."""
-        with self._connect() as conn:
-            row = conn.execute('SELECT config_json FROM extraction_runs WHERE run_id = ?', (run_id,)).fetchone()
-        return deserialize_json(row['config_json']) if row else {}
+        """Tương thích API cũ: không còn lưu config theo run.
+
+        Online/đánh giá sẽ tự fallback sang cấu hình hiện hành được truyền vào.
+        """
+        return {}
 
     def reset_preprocess_data(self):
-        """Xóa toàn bộ dữ liệu preprocess VÀ extraction (preprocess đổi thì extraction cũ vô hiệu).
+        """Xóa toàn bộ dữ liệu preprocess VÀ feature (preprocess đổi thì feature cũ vô hiệu).
         Xóa luôn images để tránh tích lũy ảnh từ nhiều dataset_root khác nhau."""
         with self._connect() as conn:
             conn.executescript("""
                 DELETE FROM evaluations;
                 DELETE FROM feature_matrices;
-                DELETE FROM feature_configs;
-                DELETE FROM extraction_runs;
                 DELETE FROM preprocess_outputs;
-                DELETE FROM preprocess_runs;
                 DELETE FROM images;
             """)
         _cache_clear(self.db_path)
 
     def reset_extraction_data(self):
-        """Xóa toàn bộ dữ liệu extraction (giữ lại preprocess)."""
+        """Xóa toàn bộ dữ liệu feature (giữ lại preprocess)."""
         with self._connect() as conn:
             conn.executescript("""
                 DELETE FROM evaluations;
                 DELETE FROM feature_matrices;
-                DELETE FROM feature_configs;
-                DELETE FROM extraction_runs;
             """)
         _cache_clear(self.db_path)
 
@@ -250,27 +236,24 @@ class SQLiteManager:
             return int(row['image_id'])
 
     def insert_preprocess_output(self, preprocess_run_id: int, image_id: int, normalized_path: str, mask_path: str, gray_path: str, edge_path: str, debug_json: dict):
-        """Lưu ĐƯỜNG DẪN 4 ảnh đã tiền xử lý của 1 ảnh (ảnh nằm trên đĩa, DB chỉ giữ path)."""
+        """Lưu ĐƯỜNG DẪN 4 ảnh đã tiền xử lý của 1 ảnh (ảnh nằm trên đĩa, DB chỉ giữ path).
+
+        preprocess_run_id giữ lại trong chữ ký cho tương thích nhưng không dùng.
+        """
         with self._connect() as conn:
             conn.execute(
                 '''
-                INSERT INTO preprocess_outputs(preprocess_run_id, image_id, normalized_path, mask_path, gray_path, edge_path, debug_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO preprocess_outputs(image_id, normalized_path, mask_path, gray_path, edge_path, debug_json)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''',
-                (preprocess_run_id, image_id, normalized_path, mask_path, gray_path, edge_path, serialize_json(debug_json)),
+                (image_id, normalized_path, mask_path, gray_path, edge_path, serialize_json(debug_json)),
             )
 
     def get_preprocess_outputs_map(self, preprocess_run_id: int | None = None) -> Dict[int, dict]:
         """Map image_id → đường dẫn ảnh trung gian, để extraction tái dùng không phải tiền xử lý lại."""
         with self._connect() as conn:
-            if preprocess_run_id is None:
-                row = conn.execute('SELECT run_id FROM preprocess_runs ORDER BY run_id DESC LIMIT 1').fetchone()
-                if row is None:
-                    return {}
-                preprocess_run_id = int(row['run_id'])
             rows = conn.execute(
-                'SELECT image_id, normalized_path, mask_path, gray_path, edge_path FROM preprocess_outputs WHERE preprocess_run_id = ?',
-                (preprocess_run_id,),
+                'SELECT image_id, normalized_path, mask_path, gray_path, edge_path FROM preprocess_outputs',
             ).fetchall()
         return {
             int(r['image_id']): {
@@ -282,23 +265,35 @@ class SQLiteManager:
             for r in rows
         }
 
-    # ── Feature configs ─────────────────────────────────────────────────────
+    # ── Feature config (gộp vào feature_matrices) ─────────────────────────────
     def insert_feature_config(self, extraction_run_id: int, feature_key: str, group_name: str, enabled: bool,
                               distance_type: str, weight: float, is_meta: bool, mean, std, vocab,
                               d_min: float = 0.0, d_max: float = 1.0, extra: dict | None = None):
-        """Lưu cấu hình + tham số chuẩn hóa của 1 feature trong 1 extraction run.
+        """Lưu cấu hình + tham số chuẩn hóa của 1 feature vào dòng feature_matrices của nó.
 
         Gồm distance_type, weight, is_meta, thang đo cố định (d_min/d_max) và các
         blob mean/std (z-score), vocab (BoVW) để online tái dùng đúng tham số.
+        UPSERT theo feature_key: phần ma trận do insert_feature_matrix ghi sau.
         """
         with self._connect() as conn:
             conn.execute(
                 '''
-                INSERT INTO feature_configs(extraction_run_id, feature_key, group_name, enabled, distance_type, weight, is_meta, d_min, d_max, mean_blob, std_blob, vocab_blob, extra_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO feature_matrices(feature_key, group_name, enabled, distance_type, weight, is_meta, d_min, d_max, mean_json, std_json, vocab_json, extra_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(feature_key) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    enabled = excluded.enabled,
+                    distance_type = excluded.distance_type,
+                    weight = excluded.weight,
+                    is_meta = excluded.is_meta,
+                    d_min = excluded.d_min,
+                    d_max = excluded.d_max,
+                    mean_json = excluded.mean_json,
+                    std_json = excluded.std_json,
+                    vocab_json = excluded.vocab_json,
+                    extra_json = excluded.extra_json
                 ''',
                 (
-                    extraction_run_id,
                     feature_key,
                     group_name,
                     int(enabled),
@@ -307,24 +302,27 @@ class SQLiteManager:
                     int(is_meta),
                     float(d_min),
                     float(d_max),
-                    np_to_blob(mean),
-                    np_to_blob(std),
-                    np_to_blob(vocab) if vocab is not None else None,
+                    _arr_to_json(mean),
+                    _arr_to_json(std),
+                    _arr_to_json(vocab) if vocab is not None else None,
                     serialize_json(extra or {}),
                 ),
             )
 
     def get_extraction_feature_configs(self, extraction_run_id: int) -> Dict[str, dict]:
-        """Đọc config mọi feature của 1 run, trả dict {feature_key: {...}}.
+        """Đọc config mọi feature, trả dict {feature_key: {...}}.
 
         Tự giải nén các blob mean/std/vocab về numpy. Đây là dữ liệu fusion/online
         cần để chuẩn hóa và chọn distance.
         """
         with self._connect() as conn:
-            rows = conn.execute('SELECT * FROM feature_configs WHERE extraction_run_id = ?', (extraction_run_id,)).fetchall()
+            rows = conn.execute(
+                'SELECT feature_key, group_name, enabled, distance_type, weight, is_meta, d_min, d_max, mean_json, std_json, vocab_json, extra_json FROM feature_matrices'
+            ).fetchall()
         out = {}
         for row in rows:
-            keys = row.keys()
+            if row['distance_type'] is None:
+                continue  # dòng chưa có config (chỉ mới có ma trận)
             out[row['feature_key']] = {
                 'feature_key': row['feature_key'],
                 'group_name': row['group_name'],
@@ -332,48 +330,58 @@ class SQLiteManager:
                 'distance_type': row['distance_type'],
                 'weight': float(row['weight']),
                 'is_meta': bool(row['is_meta']),
-                'd_min': float(row['d_min']) if 'd_min' in keys and row['d_min'] is not None else 0.0,
-                'd_max': float(row['d_max']) if 'd_max' in keys and row['d_max'] is not None else 1.0,
-                'mean': blob_to_np(row['mean_blob']) if row['mean_blob'] is not None else None,
-                'std': blob_to_np(row['std_blob']) if row['std_blob'] is not None else None,
-                'vocab': blob_to_np(row['vocab_blob']) if row['vocab_blob'] is not None else None,
+                'd_min': float(row['d_min']) if row['d_min'] is not None else 0.0,
+                'd_max': float(row['d_max']) if row['d_max'] is not None else 1.0,
+                'mean': _json_to_arr(row['mean_json']) if row['mean_json'] is not None else None,
+                'std': _json_to_arr(row['std_json']) if row['std_json'] is not None else None,
+                'vocab': _json_to_arr(row['vocab_json']) if row['vocab_json'] is not None else None,
                 'extra': deserialize_json(row['extra_json']),
             }
         return out
 
     # ── Feature matrices (gộp) ────────────────────────────────────────────────
     def insert_feature_matrix(self, extraction_run_id: int, feature_key: str, image_ids, matrix: np.ndarray):
-        """Lưu GỘP ma trận N×D của một feature + mảng image_id thành một dòng blob."""
+        """Lưu GỘP ma trận N×D của một feature + mảng image_id vào dòng feature_matrices.
+
+        UPSERT theo feature_key: phần config do insert_feature_config ghi trước.
+        """
         matrix = np.ascontiguousarray(matrix, dtype=np.float32)
         if matrix.ndim == 1:
             matrix = matrix.reshape(1, -1)
         num_rows, dim = int(matrix.shape[0]), int(matrix.shape[1])
+        image_ids_arr = np.asarray(image_ids, dtype=np.int64)
         with self._connect() as conn:
             conn.execute(
                 '''
-                INSERT INTO feature_matrices(extraction_run_id, feature_key, num_rows, dim, matrix_blob, image_ids_blob)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO feature_matrices(feature_key, num_rows, dim, matrix_json, image_ids_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(feature_key) DO UPDATE SET
+                    num_rows = excluded.num_rows,
+                    dim = excluded.dim,
+                    matrix_json = excluded.matrix_json,
+                    image_ids_json = excluded.image_ids_json
                 ''',
-                (extraction_run_id, feature_key, num_rows, dim, array_to_raw_blob(matrix), ids_to_blob(image_ids)),
+                (feature_key, num_rows, dim, _arr_to_json(matrix), json.dumps(image_ids_arr.tolist())),
             )
-        _cache_put(self.db_path, extraction_run_id, feature_key,
-                   np.asarray(image_ids, dtype=np.int64), matrix)
+        _cache_put(self.db_path, _RUN_ID, feature_key, image_ids_arr, matrix)
 
     def get_feature_matrix_raw(self, extraction_run_id: int, feature_key: str) -> Tuple[np.ndarray, np.ndarray]:
         """Trả về (image_ids int64 [N], matrix float32 [N×D]). Có cache ở mức module."""
-        cached = _cache_get(self.db_path, extraction_run_id, feature_key)
+        cached = _cache_get(self.db_path, _RUN_ID, feature_key)
         if cached is not None:
             return cached
         with self._connect() as conn:
             row = conn.execute(
-                'SELECT num_rows, dim, matrix_blob, image_ids_blob FROM feature_matrices WHERE extraction_run_id = ? AND feature_key = ?',
-                (extraction_run_id, feature_key),
+                'SELECT num_rows, dim, matrix_json, image_ids_json FROM feature_matrices WHERE feature_key = ?',
+                (feature_key,),
             ).fetchone()
-        if row is None:
+        if row is None or row['matrix_json'] is None:
             return np.zeros(0, dtype=np.int64), np.zeros((0, 0), dtype=np.float32)
-        matrix = raw_blob_to_matrix(row['matrix_blob'], int(row['num_rows']), int(row['dim']))
-        image_ids = blob_to_ids(row['image_ids_blob'])
-        _cache_put(self.db_path, extraction_run_id, feature_key, image_ids, matrix)
+        matrix = _json_to_arr(row['matrix_json'], dtype=np.float32)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(int(row['num_rows']), int(row['dim']))
+        image_ids = _json_to_arr(row['image_ids_json'], dtype=np.int64)
+        _cache_put(self.db_path, _RUN_ID, feature_key, image_ids, matrix)
         return image_ids, matrix
 
     def _images_lookup(self) -> Dict[int, dict]:
@@ -405,20 +413,19 @@ class SQLiteManager:
         return pd.DataFrame(data)
 
     def get_all_feature_matrices(self, extraction_run_id: int) -> Dict[str, pd.DataFrame]:
-        """Trả về toàn bộ feature matrix của 1 run dưới dạng {feature_key: DataFrame}."""
+        """Trả về toàn bộ feature matrix dưới dạng {feature_key: DataFrame}."""
         configs = self.get_extraction_feature_configs(extraction_run_id)
         return {k: self.get_feature_matrix(extraction_run_id, k) for k in configs.keys()}
 
     def get_feature_matrices_summary(self, extraction_run_id: int) -> List[dict]:
-        """Tóm tắt các feature matrix đã lưu của 1 run: feature_key, num_rows, dim.
+        """Tóm tắt các feature matrix đã lưu: feature_key, num_rows, dim.
 
         Dùng cho UI product để hiển thị 'dữ liệu đã trích xuất trong DB' mà không
         phải tải toàn bộ blob ma trận về.
         """
         with self._connect() as conn:
             rows = conn.execute(
-                'SELECT feature_key, num_rows, dim FROM feature_matrices WHERE extraction_run_id = ? ORDER BY feature_key',
-                (extraction_run_id,),
+                'SELECT feature_key, num_rows, dim FROM feature_matrices WHERE matrix_json IS NOT NULL ORDER BY feature_key',
             ).fetchall()
         return [
             {'feature_key': r['feature_key'], 'num_rows': int(r['num_rows']), 'dim': int(r['dim'])}
@@ -467,18 +474,18 @@ class SQLiteManager:
             rows.append(row)
         return pd.DataFrame(rows)
 
-    # ── Latest run ids ────────────────────────────────────────────────────────
+    # ── Latest run ids (suy ra từ dữ liệu hiện có) ────────────────────────────
     def get_latest_preprocess_run_id(self) -> Optional[int]:
-        """Lấy run_id của lần tiền xử lý mới nhất (None nếu chưa có)."""
+        """Trả run_id cố định nếu đã có dữ liệu tiền xử lý, None nếu chưa."""
         with self._connect() as conn:
-            row = conn.execute('SELECT run_id FROM preprocess_runs ORDER BY run_id DESC LIMIT 1').fetchone()
-            return int(row['run_id']) if row else None
+            row = conn.execute('SELECT 1 FROM preprocess_outputs LIMIT 1').fetchone()
+        return _RUN_ID if row else None
 
     def get_latest_extraction_run_id(self) -> Optional[int]:
-        """Lấy run_id của lần trích xuất mới nhất (None nếu chưa có). Online/đánh giá dùng run này."""
+        """Trả run_id cố định nếu đã có ma trận feature, None nếu chưa. Online/đánh giá dùng run này."""
         with self._connect() as conn:
-            row = conn.execute('SELECT run_id FROM extraction_runs ORDER BY run_id DESC LIMIT 1').fetchone()
-            return int(row['run_id']) if row else None
+            row = conn.execute('SELECT 1 FROM feature_matrices WHERE matrix_json IS NOT NULL LIMIT 1').fetchone()
+        return _RUN_ID if row else None
 
     def list_images(self, limit: int = 100) -> List[dict]:
         """Liệt kê các ảnh mới nhất trong bảng images (tối đa `limit` dòng)."""
@@ -486,32 +493,27 @@ class SQLiteManager:
             rows = conn.execute('SELECT * FROM images ORDER BY image_id DESC LIMIT ?', (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    # ── Evaluations (lưu kết quả đánh giá, chỉ giữ bản mới nhất / run) ─────────
+    # ── Evaluations (chỉ giữ bản mới nhất, 1 dòng id=1) ───────────────────────
     def save_evaluation(self, extraction_run_id: int, metrics: dict, separation: dict):
-        """Lưu (ghi đè) kết quả đánh giá của 1 extraction run.
-
-        Dùng UPSERT theo extraction_run_id: mỗi run chỉ giữ kết quả mới nhất,
-        không tích lũy lịch sử. Mở lại app vẫn xem được đánh giá lần gần nhất.
-        """
+        """Lưu (ghi đè) kết quả đánh giá mới nhất. Mở lại app vẫn xem được lần gần nhất."""
         with self._connect() as conn:
             conn.execute(
                 '''
-                INSERT INTO evaluations(extraction_run_id, created_at, metrics_json, separation_json)
-                VALUES (?, CURRENT_TIMESTAMP, ?, ?)
-                ON CONFLICT(extraction_run_id) DO UPDATE SET
+                INSERT INTO evaluations(id, created_at, metrics_json, separation_json)
+                VALUES (1, CURRENT_TIMESTAMP, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     metrics_json = excluded.metrics_json,
                     separation_json = excluded.separation_json
                 ''',
-                (extraction_run_id, serialize_json(metrics), serialize_json(separation)),
+                (serialize_json(metrics), serialize_json(separation)),
             )
 
     def get_evaluation(self, extraction_run_id: int) -> Optional[dict]:
-        """Đọc kết quả đánh giá đã lưu của 1 run; None nếu chưa từng đánh giá."""
+        """Đọc kết quả đánh giá đã lưu; None nếu chưa từng đánh giá."""
         with self._connect() as conn:
             row = conn.execute(
-                'SELECT created_at, metrics_json, separation_json FROM evaluations WHERE extraction_run_id = ?',
-                (extraction_run_id,),
+                'SELECT created_at, metrics_json, separation_json FROM evaluations WHERE id = 1',
             ).fetchone()
         if row is None:
             return None
@@ -569,12 +571,12 @@ class SQLiteManager:
         """Dump bảng feature_matrices nhưng chuyển blob ma trận thành mô tả đọc được,
         ẩn các feature trong hidden_keys, và sắp theo order_keys (thứ tự registry).
 
-        Cột matrix_blob -> 'numpy[N,D] | head: ...', image_ids_blob -> 'N ids: ...'.
+        Cột matrix_json -> mảng của mảng (ma trận N×D); image_ids_json -> 'N ids: ...'.
         """
         hidden_keys = set(hidden_keys or [])
         with self._connect() as conn:
             rows = conn.execute(
-                'SELECT extraction_run_id, feature_key, num_rows, dim, matrix_blob, image_ids_blob FROM feature_matrices LIMIT ?',
+                'SELECT feature_key, num_rows, dim, matrix_json, image_ids_json FROM feature_matrices WHERE matrix_json IS NOT NULL LIMIT ?',
                 (limit_rows,),
             ).fetchall()
         data = []
@@ -582,24 +584,19 @@ class SQLiteManager:
             key = r['feature_key']
             if key in hidden_keys:
                 continue
+            # matrix_json/image_ids_json đã là TEXT đọc được; hiển thị trực tiếp.
+            mat_repr = r['matrix_json'] if r['matrix_json'] is not None else '[]'
             try:
-                mat = raw_blob_to_matrix(r['matrix_blob'], int(r['num_rows']), int(r['dim']))
-                # Hiển thị dạng mảng của mảng (ma trận 2 chiều N×D), đầy đủ giá trị.
-                mat_repr = str(np.round(mat, 4).tolist())
+                ids = json.loads(r['image_ids_json'])
+                ids_repr = f'{len(ids)} ids: {ids}'
             except Exception:
-                mat_repr = '<blob>'
-            try:
-                ids = blob_to_ids(r['image_ids_blob'])
-                ids_repr = f'{len(ids)} ids: {ids.tolist()}'
-            except Exception:
-                ids_repr = '<blob>'
+                ids_repr = '[]'
             data.append({
-                'extraction_run_id': r['extraction_run_id'],
                 'feature_key': key,
                 'num_rows': int(r['num_rows']),
                 'dim': int(r['dim']),
-                'matrix_blob': mat_repr,
-                'image_ids_blob': ids_repr,
+                'matrix_json': mat_repr,
+                'image_ids_json': ids_repr,
             })
         df = pd.DataFrame(data)
         if order_keys and not df.empty:

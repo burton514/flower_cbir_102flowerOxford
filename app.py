@@ -589,15 +589,14 @@ if active_tab == "SQLite / Xem DB":
         st.caption("Xem nội dung thô các bảng (blob nhị phân được chuyển sang mô tả đọc được).")
 
         order_keys = [f.key for f in catalog]
-        # Bỏ qua bảng config/metadata và bảng log chạy (không cần xem trực tiếp).
-        skip_tables = {"feature_configs", "meta", "evaluations", "extraction_runs", "preprocess_runs"}
-        all_tables = [t for t in db.list_tables() if t not in skip_tables]
+        # Hiển thị đủ cả 4 bảng: images, preprocess_outputs, feature_matrices, evaluations.
+        all_tables = db.list_tables()
 
         for tbl in all_tables:
             with st.expander(f"Bảng: {tbl}", expanded=False):
                 if tbl == "feature_matrices":
                     # feature_matrices: ẩn feature chạy ngầm + sắp theo registry,
-                    # hiển thị dạng bảng giống các bảng khác. Cột matrix_blob là
+                    # hiển thị dạng bảng giống các bảng khác. Cột matrix_json là
                     # mảng của mảng (ma trận N×D) đầy đủ.
                     df_tbl = db.dump_feature_matrices_readable(
                         hidden_keys=hidden_keys, order_keys=order_keys
